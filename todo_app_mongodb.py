@@ -944,8 +944,6 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                         # Insert into archived_tasks collection
                         archived_tasks_collection.insert_one(archived_doc)
                         
-                        # Delete from active tasks collection
-                        tasks_collection.delete_one({'_id': ObjectId(task_id)})
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
