@@ -1,4 +1,5 @@
 import asyncio
+import os
 from solana.rpc.async_api import AsyncClient
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -14,8 +15,8 @@ from spl.token.constants import TOKEN_PROGRAM_ID
 
 # --- CONSTANTS ---
 RPC_URL = "https://api.devnet.solana.com"
-TOKEN_MINT_ADDRESS = "FNaHHy2onbLgivSd919CJfuFEi8EnL9owmBmXaXVKMFN"
-RAW_TREASURY_BYTES = [97,93,69,238,198,76,127,6,227,97,93,99,186,217,227,35,47,10,58,30,151,125,219,46,115,134,5,247,63,66,88,152,68,72,0,210,30,83,158,109,18,80,158,90,47,90,23,147,117,70,131,130,254,20,187,50,131,182,3,232,62,153,254,77] # Your full 64-number list
+TOKEN_MINT_ADDRESS = os.environ('token_address')
+RAW_TREASURY_BYTES = os.environ('sol_key') # Your full 64-number list
 DECIMALS = 9
 
 async def send_study_reward(user_wallet_address: str, amount: float):
