@@ -5,6 +5,8 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 from solders.message import MessageV0
+from pymongo import MongoClient
+from bson.objectid import ObjectId # Import this if querying by ID
 from spl.token.instructions import (
     get_associated_token_address,
     create_idempotent_associated_token_account,
@@ -70,6 +72,34 @@ async def send_study_reward(user_wallet_address: str, amount: float):
     except Exception as e:
         print(f"❌ Failed to send reward: {e}")
         return None
+
+def fetch_wallet():
+# Connet to MongoDB
+    uri = os.environ("MONGODB_URI")
+    client = MongoClient(uri)
+
+# 2. Select Database and Collection
+    db = client['todo_app']
+    collection = db['credit_transfers'] # 'users' is the collection name
+
+# 3. Define the Filter
+    query_filter = { "status": "pending" }
+
+# 4. Execute the Query
+    result = collection.find_one(query_filter)
+
+# 5. Handle the Result
+    if result:
+        print("Document found:")
+        print(result)
+    # Access specific fields like a dictionary:
+        print(f"User wallet: {result.get('walletAddress')}")
+        result = result.get('walletAddress')
+    client.close()
+    return result
+
+
+
 
 if __name__ == "__main__":
     # Example: Send 5.5 tokens to a user when they finish a task
