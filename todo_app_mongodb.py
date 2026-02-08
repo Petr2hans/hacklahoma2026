@@ -26,14 +26,11 @@ try:
     db = client[DB_NAME]
     tasks_collection = db['tasks']
     sessions_collection = db['sessions']
-    archived_tasks_collection = db['archived_tasks']
     
     # Create indexes
     tasks_collection.create_index('archived')
     tasks_collection.create_index('needs_breakdown')
     sessions_collection.create_index('session_id', unique=True)
-    archived_tasks_collection.create_index('session_id')
-    archived_tasks_collection.create_index('archived_at')
     
     print("✅ Connected to MongoDB Atlas")
     print(f"📊 Database: {DB_NAME}")
@@ -857,25 +854,6 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             
             self.wfile.write(json.dumps(tasks, cls=JSONEncoder).encode())
             
-        elif self.path == '/api/archived-stats':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
-            # Get archived tasks with stats
-            archived = list(archived_tasks_collection.find(
-                {},
-                {'task': 1, 'expectedTime': 1, 'actualTime': 1, 
-                 'completedAt': 1, 'session_id': 1, 'archivedAt': 1}
-            ).sort('archivedAt', -1))
-            
-            # Convert ObjectId to string
-            for task in archived:
-                task['id'] = str(task['_id'])
-                del task['_id']
-            
-            self.wfile.write(json.dumps(archived, cls=JSONEncoder).encode())
-            
         else:
             self.send_error(404)
     
@@ -937,28 +915,12 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 archived_tasks = archive_data['archived']
                 archived_at = archive_data['archivedAt']
                 
-                # Copy tasks to archived_tasks collection with session info
+                # Just mark tasks as archived in tasks collection
                 for task in archived_tasks:
                     if 'id' in task:
                         task_id = task['id']
                         
-                        # Create archived task document with all info
-                        archived_doc = {
-                            'original_task_id': task_id,
-                            'task': task['task'],
-                            'expectedTime': task.get('expectedTime', 0),
-                            'actualTime': task.get('actualTime', 0),
-                            'completedAt': task.get('completedAt'),
-                            'session_id': task.get('lastSessionId'),
-                            'subtasks': task.get('subtasks', []),
-                            'archivedAt': archived_at,
-                            'createdAt': task.get('createdAt')
-                        }
-                        
-                        # Insert into archived_tasks collection
-                        archived_tasks_collection.insert_one(archived_doc)
-                        
-                        # Mark as archived in tasks collection (keep it there!)
+                        # Mark as archived in tasks collection
                         tasks_collection.update_one(
                             {'_id': ObjectId(task_id)},
                             {'$set': {
