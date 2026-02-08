@@ -4,37 +4,439 @@ import json
 import os
 import webbrowser
 import threading
+import hashlib
+import secrets
 from pymongo import MongoClient
 from bson import ObjectId
 from datetime import datetime
+from http.cookies import SimpleCookie
 
 PORT = int(os.environ.get('PORT', 8000))
+
+# Session storage (in production, use Redis or MongoDB)
+sessions = {}  # {session_token: user_id}
 
 # MongoDB Atlas connection
 MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
 DB_NAME = 'todo_app'
 
 # Initialize MongoDB
+print(f"🔍 Attempting to connect to MongoDB...")
+print(f"🔍 MONGODB_URI present: {bool(os.environ.get('MONGODB_URI'))}")
+
 try:
-    client = MongoClient(MONGODB_URI)
+    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+    client.admin.command('ping')
+    
     db = client[DB_NAME]
     tasks_collection = db['tasks']
     sessions_collection = db['sessions']
-    archived_tasks_collection = db['archived_tasks']
+    users_collection = db['users']
+    credit_transfers_collection = db['credit_transfers']
     
     # Create indexes
     tasks_collection.create_index('archived')
     tasks_collection.create_index('needs_breakdown')
+    tasks_collection.create_index('userId')
     sessions_collection.create_index('session_id', unique=True)
-    archived_tasks_collection.create_index('session_id')
-    archived_tasks_collection.create_index('archived_at')
+    sessions_collection.create_index('userId')
+    users_collection.create_index('username', unique=True)
+    credit_transfers_collection.create_index('userId')
     
     print("✅ Connected to MongoDB Atlas")
+    print(f"📊 Database: {DB_NAME}")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
+    print(f"❌ Error type: {type(e).__name__}")
     print("Set MONGODB_URI environment variable with your Atlas connection string")
 
-# HTML content embedded
+# Authentication helpers
+def hash_password(password):
+    """Hash password using SHA-256 with salt"""
+    salt = secrets.token_hex(16)
+    pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+    return f"{salt}${pwd_hash}"
+
+def verify_password(password, hashed):
+    """Verify password against hash"""
+    try:
+        salt, pwd_hash = hashed.split('$')
+        return hashlib.sha256((password + salt).encode()).hexdigest() == pwd_hash
+    except:
+        return False
+
+def create_session(user_id):
+    """Create new session token"""
+    token = secrets.token_urlsafe(32)
+    sessions[token] = str(user_id)
+    return token
+
+def get_user_from_session(session_token):
+    """Get user ID from session token"""
+    return sessions.get(session_token)
+
+# Login page HTML
+LOGIN_HTML = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Focus App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .auth-container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+            padding: 50px 40px;
+        }
+        h1 {
+            text-align: center;
+            color: #2d3748;
+            font-size: 32px;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+        .subtitle {
+            text-align: center;
+            color: #718096;
+            font-size: 14px;
+            margin-bottom: 40px;
+        }
+        .form-group {
+            margin-bottom: 25px;
+        }
+        label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 8px;
+        }
+        input {
+            width: 100%;
+            padding: 14px 16px;
+            font-size: 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+        input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        .btn {
+            width: 100%;
+            padding: 14px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: white;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin-top: 10px;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+        .btn:active {
+            transform: translateY(0);
+        }
+        .error {
+            background: #fed7d7;
+            color: #c53030;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: none;
+        }
+        .link {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #718096;
+        }
+        .link a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .link a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="auth-container">
+        <h1>Welcome Back! 👋</h1>
+        <p class="subtitle">Login to continue your focus sessions</p>
+        
+        <div class="error" id="errorMsg"></div>
+        
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" required autocomplete="username">
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required autocomplete="current-password">
+            </div>
+            
+            <button type="submit" class="btn">Login</button>
+        </form>
+        
+        <div class="link">
+            Don't have an account? <a href="/register">Sign up</a>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('loginForm');
+        const errorMsg = document.getElementById('errorMsg');
+        
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    window.location.href = '/';
+                } else {
+                    errorMsg.textContent = result.message;
+                    errorMsg.style.display = 'block';
+                }
+            } catch (error) {
+                errorMsg.textContent = 'Network error. Please try again.';
+                errorMsg.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
+'''
+
+# Register page HTML
+REGISTER_HTML = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Up - Focus App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .auth-container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+            padding: 50px 40px;
+        }
+        h1 {
+            text-align: center;
+            color: #2d3748;
+            font-size: 32px;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+        .subtitle {
+            text-align: center;
+            color: #718096;
+            font-size: 14px;
+            margin-bottom: 40px;
+        }
+        .form-group {
+            margin-bottom: 25px;
+        }
+        label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 8px;
+        }
+        input {
+            width: 100%;
+            padding: 14px 16px;
+            font-size: 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+        input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        .btn {
+            width: 100%;
+            padding: 14px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: white;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin-top: 10px;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+        .btn:active {
+            transform: translateY(0);
+        }
+        .error {
+            background: #fed7d7;
+            color: #c53030;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: none;
+        }
+        .success {
+            background: #c6f6d5;
+            color: #22543d;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: none;
+        }
+        .link {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #718096;
+        }
+        .link a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .link a:hover {
+            text-decoration: underline;
+        }
+        .hint {
+            font-size: 12px;
+            color: #a0aec0;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="auth-container">
+        <h1>Create Account 🚀</h1>
+        <p class="subtitle">Start tracking your focus sessions</p>
+        
+        <div class="error" id="errorMsg"></div>
+        <div class="success" id="successMsg"></div>
+        
+        <form id="registerForm">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" required autocomplete="username">
+                <div class="hint">At least 3 characters</div>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required autocomplete="new-password">
+                <div class="hint">At least 6 characters</div>
+            </div>
+            
+            <button type="submit" class="btn">Create Account</button>
+        </form>
+        
+        <div class="link">
+            Already have an account? <a href="/login">Login</a>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('registerForm');
+        const errorMsg = document.getElementById('errorMsg');
+        const successMsg = document.getElementById('successMsg');
+        
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            
+            errorMsg.style.display = 'none';
+            successMsg.style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    successMsg.textContent = result.message + ' Redirecting to login...';
+                    successMsg.style.display = 'block';
+                    setTimeout(() => {
+                        window.location.href = '/login';
+                    }, 1500);
+                } else {
+                    errorMsg.textContent = result.message;
+                    errorMsg.style.display = 'block';
+                }
+            } catch (error) {
+                errorMsg.textContent = 'Network error. Please try again.';
+                errorMsg.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
+'''
+
+# Main app HTML (same as before, but loads for authenticated users only)
 HTML_CONTENT = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -65,6 +467,27 @@ HTML_CONTENT = '''<!DOCTYPE html>
             width: 100%;
             max-width: 500px;
             padding: 40px;
+            position: relative;
+        }
+
+        .logout-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: #718096;
+            background: white;
+        }
+
+        .logout-btn:hover {
+            border-color: #f56565;
+            color: #f56565;
         }
 
         h1 {
@@ -426,6 +849,57 @@ HTML_CONTENT = '''<!DOCTYPE html>
             font-size: 20px;
         }
 
+        .credits-section {
+            background: linear-gradient(135deg, #f6ad55 0%, #ed8936 100%);
+            border-radius: 16px;
+            padding: 25px;
+            margin-bottom: 25px;
+            color: white;
+        }
+
+        .credits-earned {
+            font-size: 48px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .credits-label {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        .wallet-section {
+            margin-bottom: 25px;
+        }
+
+        .wallet-label {
+            font-size: 14px;
+            color: #4a5568;
+            margin-bottom: 8px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .wallet-input {
+            width: 100%;
+            padding: 14px 16px;
+            font-size: 14px;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            outline: none;
+            transition: all 0.3s ease;
+            font-family: 'Courier New', monospace;
+        }
+
+        .wallet-input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .wallet-input::placeholder {
+            color: #a0aec0;
+        }
+
         .close-modal-btn {
             padding: 14px 40px;
             font-size: 16px;
@@ -446,10 +920,18 @@ HTML_CONTENT = '''<!DOCTYPE html>
         .close-modal-btn:active {
             transform: translateY(0);
         }
+
+        .close-modal-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
     </style>
 </head>
 <body>
     <div class="container">
+        <button class="logout-btn" onclick="logout()">Logout</button>
+        
         <h1>To-Do List</h1>
         
         <div class="input-section">
@@ -492,6 +974,22 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     <span class="stat-value" id="modalTotalTasks">--</span>
                 </div>
             </div>
+
+            <div class="credits-section">
+                <div class="credits-earned" id="creditsEarned">0</div>
+                <div class="credits-label">Credits Earned 💰</div>
+            </div>
+
+            <div class="wallet-section">
+                <div class="wallet-label">Wallet Address (to receive credits)</div>
+                <input 
+                    type="text" 
+                    class="wallet-input" 
+                    id="walletInput" 
+                    placeholder="0x... or your wallet address"
+                    autocomplete="off"
+                >
+            </div>
             
             <button class="close-modal-btn" id="closeModalBtn">Continue</button>
         </div>
@@ -506,6 +1004,20 @@ HTML_CONTENT = '''<!DOCTYPE html>
         let timerInterval = null;
         let currentTaskStartTime = null;
         let currentSessionId = null;
+        let creditsEarned = 0;
+
+        function logout() {
+            fetch('/api/logout', { method: 'POST' })
+                .then(() => {
+                    window.location.href = '/login';
+                });
+        }
+
+        function calculateCredits(durationSeconds) {
+            // 1 credit per 15 SECONDS
+            const credits = durationSeconds / 15;
+            return Math.max(0, credits);
+        }
 
         async function loadTasks() {
             try {
@@ -535,17 +1047,18 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
             const tasksCompleted = tasks.filter(t => t.done && t.lastSessionId === currentSessionId).length;
             
-            // Create session summary
+            creditsEarned = calculateCredits(sessionDuration);
+            
             const sessionData = {
                 sessionId: currentSessionId,
                 startTime: new Date(sessionStartTime).toISOString(),
                 endTime: new Date().toISOString(),
                 totalDuration: sessionDuration,
                 tasksCompleted: tasksCompleted,
+                creditsEarned: creditsEarned,
                 timestamp: Date.now()
             };
             
-            // Save session data
             try {
                 await fetch('/api/session', {
                     method: 'POST',
@@ -557,19 +1070,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 console.error('Failed to save session:', error);
             }
             
-            // Auto-archive completed tasks
             const completedTasks = tasks.filter(t => t.done);
             if (completedTasks.length > 0) {
                 await archiveToFile(completedTasks);
-                // Remove completed tasks from active list
-                tasks = tasks.filter(t => !t.done);
-                await saveTasks();
+                await loadTasks();
             }
             
-            // Show congratulations modal
-            showCongratsModal(sessionDuration, tasksCompleted, tasks.length + completedTasks.length);
+            showCongratsModal(sessionDuration, tasksCompleted, tasks.length);
             
-            // Reset everything
             sessionRunning = false;
             sessionPaused = false;
             sessionStartTime = null;
@@ -577,11 +1085,9 @@ HTML_CONTENT = '''<!DOCTYPE html>
             currentSessionId = null;
             clearInterval(timerInterval);
             
-            // Re-enable task input
             const inputSection = document.querySelector('.input-section');
             inputSection.classList.remove('disabled');
             
-            // Reset UI
             const startBtn = document.getElementById('startBtn');
             startBtn.textContent = 'Start Session';
             startBtn.classList.remove('hidden');
@@ -593,7 +1099,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             display.classList.remove('running');
             display.textContent = '00:00:00';
             
-            // Re-render to show only incomplete tasks
             renderTasks();
         }
 
@@ -601,14 +1106,64 @@ HTML_CONTENT = '''<!DOCTYPE html>
             document.getElementById('modalDuration').textContent = formatTime(duration);
             document.getElementById('modalTasksCompleted').textContent = tasksCompleted;
             document.getElementById('modalTotalTasks').textContent = totalTasks;
+            document.getElementById('creditsEarned').textContent = creditsEarned.toFixed(2);
             
             const modal = document.getElementById('congratsModal');
             modal.classList.add('show');
         }
 
-        function closeCongratsModal() {
-            const modal = document.getElementById('congratsModal');
-            modal.classList.remove('show');
+        async function closeCongratsModal() {
+            const walletInput = document.getElementById('walletInput');
+            const walletAddress = walletInput.value.trim();
+            
+            if (!walletAddress) {
+                alert('⚠️ Please enter a wallet address to receive your credits!');
+                walletInput.focus();
+                return;
+            }
+            
+            if (!walletAddress.startsWith('0x') || walletAddress.length < 20) {
+                alert('⚠️ Please enter a valid wallet address (should start with 0x)');
+                walletInput.focus();
+                return;
+            }
+            
+            const continueBtn = document.getElementById('closeModalBtn');
+            continueBtn.disabled = true;
+            continueBtn.textContent = 'Processing...';
+            
+            try {
+                const response = await fetch('/api/credit-transfer', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        walletAddress: walletAddress,
+                        credits: creditsEarned,
+                        sessionId: currentSessionId || 'unknown'
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    console.log('✅ Credits transferred:', result);
+                    alert(`🎉 Success! ${creditsEarned.toFixed(2)} credits sent to ${walletAddress.slice(0, 10)}...`);
+                    
+                    const modal = document.getElementById('congratsModal');
+                    modal.classList.remove('show');
+                    
+                    walletInput.value = '';
+                    creditsEarned = 0;
+                } else {
+                    alert('❌ Failed to transfer credits. Please try again.');
+                }
+            } catch (error) {
+                console.error('Credit transfer error:', error);
+                alert('❌ Network error. Please check your connection and try again.');
+            } finally {
+                continueBtn.disabled = false;
+                continueBtn.textContent = 'Continue';
+            }
         }
 
         function formatTime(seconds) {
@@ -633,22 +1188,24 @@ HTML_CONTENT = '''<!DOCTYPE html>
         }
 
         function startSession() {
+            if (tasks.length === 0) {
+                alert('⚠️ Please add at least one task before starting a session!');
+                return;
+            }
+            
             sessionRunning = true;
             sessionPaused = false;
             
             if (!sessionStartTime) {
-                // First time starting
                 sessionStartTime = Date.now();
                 currentSessionId = 'session_' + Date.now();
             }
             
             currentTaskStartTime = Date.now();
             
-            // Disable task input
             const inputSection = document.querySelector('.input-section');
             inputSection.classList.add('disabled');
             
-            // Update UI
             document.getElementById('startBtn').classList.add('hidden');
             document.getElementById('stopBtn').classList.remove('hidden');
             document.getElementById('finishBtn').classList.remove('hidden');
@@ -664,12 +1221,10 @@ HTML_CONTENT = '''<!DOCTYPE html>
             sessionPaused = true;
             clearInterval(timerInterval);
             
-            // Update start button text
             const startBtn = document.getElementById('startBtn');
             startBtn.textContent = 'Continue Session';
             startBtn.classList.remove('hidden');
             
-            // Hide stop and finish buttons
             document.getElementById('stopBtn').classList.add('hidden');
             document.getElementById('finishBtn').classList.add('hidden');
             
@@ -701,22 +1256,18 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     <button class="delete-btn">×</button>
                 `;
                 
-                // Click task to toggle done/undone
                 const taskContent = taskItem.querySelector('.task-content');
                 taskContent.addEventListener('click', () => {
                     if (selectedIndex === index) {
-                        // Toggle task completion
                         const wasUndone = !tasks[index].done;
                         tasks[index].done = !tasks[index].done;
                         
-                        // If marking as done and session is running, record duration
                         if (wasUndone && sessionRunning && currentTaskStartTime) {
                             const actualTime = Math.floor((Date.now() - currentTaskStartTime) / 1000);
                             tasks[index].actualTime = (tasks[index].actualTime || 0) + actualTime;
                             tasks[index].completedAt = new Date().toISOString();
                             tasks[index].lastSessionId = currentSessionId;
                             
-                            // Reset timer for next task
                             currentTaskStartTime = Date.now();
                         }
                         
@@ -728,7 +1279,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     }
                 });
                 
-                // Click X to delete
                 const deleteBtn = taskItem.querySelector('.delete-btn');
                 deleteBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -755,16 +1305,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const taskText = input.value.trim();
             
             if (taskText) {
-                // Create task with full structure for LLM breakdown
                 const newTask = {
                     task: taskText,
                     done: false,
-                    expectedTime: 0, // Will be set by LLM or user estimate
+                    expectedTime: 0,
                     actualTime: 0,
                     createdAt: new Date().toISOString(),
-                    // These will be filled by LLM:
-                    subtasks: [], // Array of { task: string, expectedTime: 600, actualTime: 0, done: false }
-                    needsBreakdown: true // Flag for LLM to process
+                    subtasks: [],
+                    needsBreakdown: true
                 };
                 
                 tasks.push(newTask);
@@ -816,69 +1364,208 @@ class JSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 class TodoHandler(http.server.SimpleHTTPRequestHandler):
+    def get_session_token(self):
+        """Extract session token from cookies"""
+        cookie_header = self.headers.get('Cookie')
+        if not cookie_header:
+            return None
+        
+        cookies = SimpleCookie()
+        cookies.load(cookie_header)
+        
+        if 'session_token' in cookies:
+            return cookies['session_token'].value
+        return None
+    
+    def get_current_user(self):
+        """Get current user ID from session"""
+        token = self.get_session_token()
+        if not token:
+            return None
+        return get_user_from_session(token)
+    
+    def require_auth(self):
+        """Require authentication, redirect to login if not authenticated"""
+        user_id = self.get_current_user()
+        if not user_id:
+            self.send_response(302)
+            self.send_header('Location', '/login')
+            self.end_headers()
+            return None
+        return user_id
+    
     def do_GET(self):
-        if self.path == '/' or self.path == '/index.html':
+        if self.path == '/login':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(LOGIN_HTML.encode())
+            
+        elif self.path == '/register':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(REGISTER_HTML.encode())
+            
+        elif self.path == '/' or self.path == '/index.html':
+            user_id = self.require_auth()
+            if not user_id:
+                return
+            
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
             self.wfile.write(HTML_CONTENT.encode())
             
         elif self.path == '/api/tasks':
+            user_id = self.require_auth()
+            if not user_id:
+                return
+            
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # Get active (non-archived) tasks from MongoDB
+            # Get tasks for THIS USER ONLY
             tasks = list(tasks_collection.find(
-                {'archived': False},
+                {'userId': user_id, 'archived': False},
                 {'task': 1, 'done': 1, 'expectedTime': 1, 'actualTime': 1,
                  'createdAt': 1, 'completedAt': 1, 'lastSessionId': 1, 
                  'subtasks': 1, 'needsBreakdown': 1}
             ).sort('_id', 1))
             
-            # Convert ObjectId to string for JSON
             for task in tasks:
                 task['id'] = str(task['_id'])
                 del task['_id']
             
             self.wfile.write(json.dumps(tasks, cls=JSONEncoder).encode())
             
-        elif self.path == '/api/archived-stats':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
-            # Get archived tasks with stats
-            archived = list(archived_tasks_collection.find(
-                {},
-                {'task': 1, 'expectedTime': 1, 'actualTime': 1, 
-                 'completedAt': 1, 'session_id': 1, 'archivedAt': 1}
-            ).sort('archivedAt', -1))
-            
-            # Convert ObjectId to string
-            for task in archived:
-                task['id'] = str(task['_id'])
-                del task['_id']
-            
-            self.wfile.write(json.dumps(archived, cls=JSONEncoder).encode())
-            
         else:
             self.send_error(404)
     
     def do_POST(self):
-        if self.path == '/api/tasks':
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+        
+        if self.path == '/api/register':
+            try:
+                data = json.loads(post_data)
+                username = data.get('username', '').strip()
+                password = data.get('password', '')
+                
+                if len(username) < 3:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': False,
+                        'message': 'Username must be at least 3 characters'
+                    }).encode())
+                    return
+                
+                if len(password) < 6:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': False,
+                        'message': 'Password must be at least 6 characters'
+                    }).encode())
+                    return
+                
+                if users_collection.find_one({'username': username}):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': False,
+                        'message': 'Username already exists'
+                    }).encode())
+                    return
+                
+                hashed_password = hash_password(password)
+                user_id = users_collection.insert_one({
+                    'username': username,
+                    'password': hashed_password,
+                    'createdAt': datetime.now().isoformat()
+                }).inserted_id
+                
+                print(f"✅ New user registered: {username}")
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'message': 'Account created successfully'
+                }).encode())
+                
+            except Exception as e:
+                print(f"Registration error: {e}")
+                self.send_error(500)
+                
+        elif self.path == '/api/login':
+            try:
+                data = json.loads(post_data)
+                username = data.get('username', '').strip()
+                password = data.get('password', '')
+                
+                user = users_collection.find_one({'username': username})
+                
+                if not user or not verify_password(password, user['password']):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': False,
+                        'message': 'Invalid username or password'
+                    }).encode())
+                    return
+                
+                session_token = create_session(str(user['_id']))
+                
+                print(f"✅ User logged in: {username}")
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Set-Cookie', f'session_token={session_token}; Path=/; HttpOnly; Max-Age=2592000')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'message': 'Login successful'
+                }).encode())
+                
+            except Exception as e:
+                print(f"Login error: {e}")
+                self.send_error(500)
+                
+        elif self.path == '/api/logout':
+            session_token = self.get_session_token()
+            if session_token and session_token in sessions:
+                del sessions[session_token]
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Set-Cookie', 'session_token=; Path=/; HttpOnly; Max-Age=0')
+            self.end_headers()
+            self.wfile.write(b'{"success": true}')
+                
+        elif self.path == '/api/tasks':
+            user_id = self.get_current_user()
+            if not user_id:
+                self.send_error(401)
+                return
             
             try:
                 tasks = json.loads(post_data)
                 
-                # Clear existing non-archived tasks
-                tasks_collection.delete_many({'archived': False})
+                # Delete existing tasks for THIS USER
+                tasks_collection.delete_many({'userId': user_id, 'archived': False})
                 
-                # Insert all tasks
+                # Insert tasks with USER ID
                 for task in tasks:
                     task_id = task.pop('id', None)
+                    task['userId'] = user_id  # ⭐ ADD USER ID
                     task['archived'] = False
                     task['done'] = bool(task.get('done', False))
                     task['expectedTime'] = int(task.get('expectedTime', 0))
@@ -898,11 +1585,14 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(500)
                 
         elif self.path == '/api/session':
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
+            user_id = self.get_current_user()
+            if not user_id:
+                self.send_error(401)
+                return
             
             try:
                 session_data = json.loads(post_data)
+                session_data['userId'] = user_id  # ⭐ ADD USER ID
                 sessions_collection.insert_one(session_data)
                 
                 self.send_response(200)
@@ -915,37 +1605,28 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(500)
                 
         elif self.path == '/api/archive':
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
+            user_id = self.get_current_user()
+            if not user_id:
+                self.send_error(401)
+                return
             
             try:
                 archive_data = json.loads(post_data)
                 archived_tasks = archive_data['archived']
                 archived_at = archive_data['archivedAt']
                 
-                # Move tasks to archived_tasks collection with session info
                 for task in archived_tasks:
                     if 'id' in task:
                         task_id = task['id']
                         
-                        # Create archived task document with all info
-                        archived_doc = {
-                            'original_task_id': task_id,
-                            'task': task['task'],
-                            'expectedTime': task.get('expectedTime', 0),
-                            'actualTime': task.get('actualTime', 0),
-                            'completedAt': task.get('completedAt'),
-                            'session_id': task.get('lastSessionId'),
-                            'subtasks': task.get('subtasks', []),
-                            'archivedAt': archived_at,
-                            'createdAt': task.get('createdAt')
-                        }
-                        
-                        # Insert into archived_tasks collection
-                        archived_tasks_collection.insert_one(archived_doc)
-                        
-                        # Delete from active tasks collection
-                        tasks_collection.delete_one({'_id': ObjectId(task_id)})
+                        # Archive only THIS USER's tasks
+                        tasks_collection.update_one(
+                            {'_id': ObjectId(task_id), 'userId': user_id},
+                            {'$set': {
+                                'archived': True,
+                                'archivedAt': archived_at
+                            }}
+                        )
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -954,6 +1635,46 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 
             except Exception as e:
                 print(f"Error archiving tasks: {e}")
+                self.send_error(500)
+                
+        elif self.path == '/api/credit-transfer':
+            user_id = self.get_current_user()
+            if not user_id:
+                self.send_error(401)
+                return
+            
+            try:
+                transfer_data = json.loads(post_data)
+                wallet_address = transfer_data.get('walletAddress')
+                credits = transfer_data.get('credits', 0)
+                session_id = transfer_data.get('sessionId')
+                
+                # Log credit transfer WITH USER ID
+                credit_record = {
+                    'userId': user_id,  # ⭐ TRACK USER
+                    'walletAddress': wallet_address,
+                    'credits': credits,
+                    'sessionId': session_id,
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'pending'
+                }
+                
+                credit_transfers_collection.insert_one(credit_record)
+                
+                print(f"💰 Credit Transfer: {credits} credits → {wallet_address} (User: {user_id})")
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'credits': credits,
+                    'walletAddress': wallet_address,
+                    'message': 'Credits transferred successfully'
+                }).encode())
+                
+            except Exception as e:
+                print(f"Error transferring credits: {e}")
                 self.send_error(500)
         else:
             self.send_error(404)
@@ -968,6 +1689,7 @@ if __name__ == '__main__':
     with socketserver.TCPServer(("0.0.0.0", PORT), TodoHandler) as httpd:
         print(f"✨ To-Do App running at http://localhost:{PORT}")
         print(f"📊 Database: MongoDB Atlas - {DB_NAME}")
+        print(f"🔐 Authentication: Enabled")
         
         if os.environ.get('PORT') is None:
             print("🌐 Opening browser...")
