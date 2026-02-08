@@ -569,13 +569,13 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const completedTasks = tasks.filter(t => t.done);
             if (completedTasks.length > 0) {
                 await archiveToFile(completedTasks);
-                // Remove completed tasks from active list
-                tasks = tasks.filter(t => !t.done);
-                await saveTasks();
+                // Backend will handle marking as archived
+                // Just reload tasks to get updated list
+                await loadTasks();
             }
             
             // Show congratulations modal
-            showCongratsModal(sessionDuration, tasksCompleted, tasks.length + completedTasks.length);
+            showCongratsModal(sessionDuration, tasksCompleted, tasks.length);
             
             // Reset everything
             sessionRunning = false;
@@ -641,6 +641,12 @@ HTML_CONTENT = '''<!DOCTYPE html>
         }
 
         function startSession() {
+            // Check if there are any tasks
+            if (tasks.length === 0) {
+                alert('⚠️ Please add at least one task before starting a session!');
+                return;
+            }
+            
             sessionRunning = true;
             sessionPaused = false;
             
