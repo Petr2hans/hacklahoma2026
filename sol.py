@@ -16,14 +16,12 @@ from spl.token.constants import TOKEN_PROGRAM_ID
 # --- CONSTANTS ---
 RPC_URL = "https://api.devnet.solana.com"
 TOKEN_MINT_ADDRESS = os.environ('token_address')
-RAW_TREASURY_BYTES = os.environ('sol_key') # Your full 64-number list
+RAW_TREASURY_BYTES = os.environ('sol_key')
 DECIMALS = 9
 
 async def send_study_reward(user_wallet_address: str, amount: float):
     """
     Sends tokens to a user. Handles account creation automatically.
-    :param user_wallet_address: The public key of the user (string)
-    :param amount: The number of tokens to send (e.g., 5.0)
     """
     try:
         async with AsyncClient(RPC_URL) as client:
@@ -73,7 +71,6 @@ async def send_study_reward(user_wallet_address: str, amount: float):
         print(f"❌ Failed to send reward: {e}")
         return None
 
-# --- HOW TO USE IT ---
 if __name__ == "__main__":
     # Example: Send 5.5 tokens to a user when they finish a task
     target_user = "PASTE_A_USER_PUBKEY_HERE"
