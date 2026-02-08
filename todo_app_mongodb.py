@@ -986,7 +986,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     type="text" 
                     class="wallet-input" 
                     id="walletInput" 
-                    placeholder="0x... or your wallet address"
+                    placeholder="Enter your wallet address (any crypto)"
                     autocomplete="off"
                 >
             </div>
@@ -1122,12 +1122,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 return;
             }
             
-            if (!walletAddress.startsWith('0x') || walletAddress.length < 20) {
-                alert('⚠️ Please enter a valid wallet address (should start with 0x)');
-                walletInput.focus();
-                return;
-            }
-            
             const continueBtn = document.getElementById('closeModalBtn');
             continueBtn.disabled = true;
             continueBtn.textContent = 'Processing...';
@@ -1147,7 +1141,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 
                 if (result.success) {
                     console.log('✅ Credits transferred:', result);
-                    alert(`🎉 Success! ${creditsEarned.toFixed(2)} credits sent to ${walletAddress.slice(0, 10)}...`);
+                    alert(`🎉 Success! ${creditsEarned.toFixed(2)} credits sent to ${walletAddress.slice(0, 15)}...`);
                     
                     const modal = document.getElementById('congratsModal');
                     modal.classList.remove('show');
