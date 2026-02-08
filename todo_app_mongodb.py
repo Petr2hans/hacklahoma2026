@@ -11,7 +11,7 @@ from datetime import datetime
 PORT = int(os.environ.get('PORT', 8000))
 
 # MongoDB Atlas connection
-MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
+MONGODB_URI = os.environ['MONGODB_URI']
 DB_NAME = 'todo_app'
 
 # Initialize MongoDB
