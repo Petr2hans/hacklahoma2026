@@ -11,6 +11,18 @@ from bson import ObjectId
 from datetime import datetime
 from http.cookies import SimpleCookie
 
+# Import new service modules
+from auth_service import (
+    register_user, login_user, get_user_by_id, 
+    update_user_wallet, hash_password, verify_password
+)
+from task_service import (
+    create_task, get_user_tasks, get_task_by_id,
+    mark_subtask_done, archive_task, save_user_tasks, complete_task
+)
+from breakdown_service import request_breakdown
+from completion_service import complete_task_with_reward, get_reward_history
+
 PORT = int(os.environ.get('PORT', 8000))
 
 # Session storage
@@ -34,7 +46,7 @@ try:
     
     # Create indexes
     tasks_collection.create_index('archived')
-    tasks_collection.create_index('needs_breakdown')
+    tasks_collection.create_index('needsBreakdown')
     tasks_collection.create_index('userId')
     sessions_collection.create_index('session_id', unique=True)
     sessions_collection.create_index('userId')
@@ -46,85 +58,21 @@ try:
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
 
-# Authentication helpers
-def hash_password(password):
-    salt = secrets.token_hex(16)
-    pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-    return f"{salt}${pwd_hash}"
-
-def verify_password(password, hashed):
-    try:
-        salt, pwd_hash = hashed.split('$')
-        return hashlib.sha256((password + salt).encode()).hexdigest() == pwd_hash
-    except:
-        return False
-
 def create_session(user_id):
+    """Create a new session token"""
     token = secrets.token_urlsafe(32)
+    sessions[token] = str(user_id)
+    return token
+
+def get_current_user_from_token(token):
+    """Get user ID from session token"""
+    return sessions.get(token)
     sessions[token] = str(user_id)
     return token
 
 def get_user_from_session(session_token):
     return sessions.get(session_token)
 
-# Task breakdown function (placeholder - integrate your Gemini logic here)
-def breakdown_task(task_title, user_id):
-    """
-    TODO: Replace this with your actual Gemini breakdown logic from workers_breakdown.py
-    
-    For now, returns a simple example breakdown
-    """
-    # Your actual implementation would call:
-    # from workers_breakdown import breakdown_one_task
-    # sections, flat, task_type, pace = breakdown_one_task(user_id, doc)
-    
-    # Example breakdown structure
-    return {
-        "sections": [
-            {
-                "title": "Getting Started",
-                "expectedTime": 900,  # 15 min
-                "items": [
-                    {
-                        "id": "st_1_abc123",
-                        "task": f"Research and gather materials for: {task_title}",
-                        "expectedTime": 600,
-                        "actualTime": 0,
-                        "done": False
-                    },
-                    {
-                        "id": "st_2_def456",
-                        "task": "Create outline or plan",
-                        "expectedTime": 300,
-                        "actualTime": 0,
-                        "done": False
-                    }
-                ]
-            },
-            {
-                "title": "Main Work",
-                "expectedTime": 1800,  # 30 min
-                "items": [
-                    {
-                        "id": "st_3_ghi789",
-                        "task": "Complete main portion of the work",
-                        "expectedTime": 1200,
-                        "actualTime": 0,
-                        "done": False
-                    },
-                    {
-                        "id": "st_4_jkl012",
-                        "task": "Review and refine",
-                        "expectedTime": 600,
-                        "actualTime": 0,
-                        "done": False
-                    }
-                ]
-            }
-        ],
-        "taskType": "other",
-        "paceMultiplier": 1.0
-    }
 
 # Login page HTML
 LOGIN_HTML = '''<!DOCTYPE html>
@@ -1452,7 +1400,7 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
         token = self.get_session_token()
         if not token:
             return None
-        return get_user_from_session(token)
+        return get_current_user_from_token(token)
     
     def require_auth(self):
         user_id = self.get_current_user()
@@ -1495,17 +1443,24 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            tasks = list(tasks_collection.find(
-                {'userId': user_id, 'archived': False},
-                {'task': 1, 'done': 1, 'expectedTime': 1, 'actualTime': 1,
-                 'createdAt': 1, 'sections': 1, 'subtasks': 1, 'needsBreakdown': 1}
-            ).sort('_id', 1))
-            
-            for task in tasks:
-                task['id'] = str(task['_id'])
-                del task['_id']
+            # Use task_service to get tasks
+            tasks = get_user_tasks(user_id, archived=False)
             
             self.wfile.write(json.dumps(tasks, cls=JSONEncoder).encode())
+        
+        elif self.path.startswith('/api/rewards'):
+            user_id = self.require_auth()
+            if not user_id:
+                return
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            # Use completion_service to get reward history
+            rewards = get_reward_history(user_id)
+            
+            self.wfile.write(json.dumps({'rewards': rewards}, cls=JSONEncoder).encode())
             
         else:
             self.send_error(404)
@@ -1520,55 +1475,19 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 username = data.get('username', '').strip()
                 password = data.get('password', '')
                 
-                if len(username) < 3:
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'Username must be at least 3 characters'
-                    }).encode())
-                    return
-                
-                if len(password) < 6:
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'Password must be at least 6 characters'
-                    }).encode())
-                    return
-                
-                if users_collection.find_one({'username': username}):
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'Username already exists'
-                    }).encode())
-                    return
-                
-                hashed_password = hash_password(password)
-                users_collection.insert_one({
-                    'username': username,
-                    'password': hashed_password,
-                    'createdAt': datetime.now().isoformat()
-                })
-                
-                print(f"✅ New user registered: {username}")
+                # Use auth_service to register
+                success, message, user_id = register_user(username, password)
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({
-                    'success': True,
-                    'message': 'Account created successfully'
+                    'success': success,
+                    'message': message
                 }).encode())
                 
             except Exception as e:
-                print(f"Registration error: {e}")
+                print(f"❌ Registration error: {e}")
                 self.send_error(500)
                 
         elif self.path == '/api/login':
@@ -1577,21 +1496,21 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 username = data.get('username', '').strip()
                 password = data.get('password', '')
                 
-                user = users_collection.find_one({'username': username})
+                # Use auth_service to login
+                success, message, user_id = login_user(username, password)
                 
-                if not user or not verify_password(password, user['password']):
+                if not success:
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
                     self.wfile.write(json.dumps({
                         'success': False,
-                        'message': 'Invalid username or password'
+                        'message': message
                     }).encode())
                     return
                 
-                session_token = create_session(str(user['_id']))
-                
-                print(f"✅ User logged in: {username}")
+                # Create session
+                session_token = create_session(user_id)
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -1626,28 +1545,16 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 tasks = json.loads(post_data)
                 
-                tasks_collection.delete_many({'userId': user_id, 'archived': False})
-                
-                for task in tasks:
-                    task_id = task.pop('id', None)
-                    task['userId'] = user_id
-                    task['archived'] = False
-                    task['done'] = bool(task.get('done', False))
-                    task['expectedTime'] = int(task.get('expectedTime', 0))
-                    task['actualTime'] = int(task.get('actualTime', 0))
-                    task['needsBreakdown'] = bool(task.get('needsBreakdown', True))
-                    task['sections'] = task.get('sections', None)
-                    task['subtasks'] = task.get('subtasks', [])
-                    
-                    tasks_collection.insert_one(task)
+                # Use task_service to save all tasks
+                success = save_user_tasks(user_id, tasks)
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
-                self.wfile.write(b'{"success": true}')
+                self.wfile.write(json.dumps({'success': success}).encode())
                 
             except Exception as e:
-                print(f"Error saving tasks: {e}")
+                print(f"❌ Error saving tasks: {e}")
                 self.send_error(500)
         
         elif self.path == '/api/breakdown':
@@ -1660,41 +1567,31 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 data = json.loads(post_data)
                 task_id = data.get('taskId')
                 
-                # Get the task
-                task = tasks_collection.find_one({
-                    '_id': ObjectId(task_id),
-                    'userId': user_id
-                })
+                # Use breakdown_service to break down task
+                success, message, breakdown_result = request_breakdown(user_id, task_id)
                 
-                if not task:
-                    self.send_error(404)
+                if not success:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': False,
+                        'message': message
+                    }).encode())
                     return
-                
-                # Call breakdown function
-                breakdown_result = breakdown_task(task['task'], user_id)
-                
-                # Update task with breakdown
-                tasks_collection.update_one(
-                    {'_id': ObjectId(task_id)},
-                    {'$set': {
-                        'sections': breakdown_result['sections'],
-                        'needsBreakdown': False,
-                        'taskType': breakdown_result.get('taskType', 'other'),
-                        'paceMultiplier': breakdown_result.get('paceMultiplier', 1.0),
-                        'breakdownAt': datetime.now().isoformat()
-                    }}
-                )
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': True,
-                    'sections': breakdown_result['sections']
+                    'sections': breakdown_result.get('sections', []),
+                    'taskType': breakdown_result.get('taskType'),
+                    'paceMultiplier': breakdown_result.get('paceMultiplier')
                 }).encode())
                 
             except Exception as e:
-                print(f"Breakdown error: {e}")
+                print(f"❌ Breakdown error: {e}")
                 self.send_error(500)
                 
         elif self.path == '/api/session':
@@ -1717,6 +1614,34 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 print(f"Error saving session: {e}")
                 self.send_error(500)
                 
+        elif self.path == '/api/tasks-complete':
+            # Complete a task with evaluation and rewards
+            user_id = self.get_current_user()
+            if not user_id:
+                self.send_error(401)
+                return
+            
+            try:
+                data = json.loads(post_data)
+                task_id = data.get('taskId')
+                wallet_address = data.get('walletAddress')
+                
+                # Update wallet if provided
+                if wallet_address:
+                    update_user_wallet(user_id, wallet_address)
+                
+                # Complete task with reward evaluation
+                result = complete_task_with_reward(user_id, task_id)
+                
+                self.send_response(200 if result['success'] else 400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode())
+                
+            except Exception as e:
+                print(f"❌ Task completion error: {e}")
+                self.send_error(500)
+        
         elif self.path == '/api/credit-transfer':
             user_id = self.get_current_user()
             if not user_id:
@@ -1729,18 +1654,10 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 credits = transfer_data.get('credits', 0)
                 session_id = transfer_data.get('sessionId')
                 
-                credit_record = {
-                    'userId': user_id,
-                    'walletAddress': wallet_address,
-                    'credits': credits,
-                    'sessionId': session_id,
-                    'timestamp': datetime.now().isoformat(),
-                    'status': 'pending'
-                }
+                # Update wallet
+                update_user_wallet(user_id, wallet_address)
                 
-                credit_transfers_collection.insert_one(credit_record)
-                
-                print(f"💰 Credit Transfer: {credits} credits → {wallet_address}")
+                print(f"💰 Wallet updated: {wallet_address}")
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -1749,11 +1666,11 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                     'success': True,
                     'credits': credits,
                     'walletAddress': wallet_address,
-                    'message': 'Credits transferred successfully'
+                    'message': 'Wallet updated successfully'
                 }).encode())
                 
             except Exception as e:
-                print(f"Error transferring credits: {e}")
+                print(f"❌ Error updating wallet: {e}")
                 self.send_error(500)
         else:
             self.send_error(404)

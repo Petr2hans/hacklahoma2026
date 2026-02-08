@@ -17,8 +17,8 @@ from spl.token.constants import TOKEN_PROGRAM_ID
 
 # --- CONSTANTS ---
 RPC_URL = "https://api.devnet.solana.com"
-TOKEN_MINT_ADDRESS = os.environ('token_address')
-RAW_TREASURY_BYTES = os.environ('sol_key')
+TOKEN_MINT_ADDRESS = os.environ.get('token_address', '')
+RAW_TREASURY_BYTES = os.environ.get('sol_key', b'')
 DECIMALS = 9
 
 async def send_study_reward(user_wallet_address: str, amount: float):
