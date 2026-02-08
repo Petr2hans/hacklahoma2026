@@ -431,6 +431,57 @@ HTML_CONTENT = '''<!DOCTYPE html>
             font-size: 20px;
         }
 
+        .credits-section {
+            background: linear-gradient(135deg, #f6ad55 0%, #ed8936 100%);
+            border-radius: 16px;
+            padding: 25px;
+            margin-bottom: 25px;
+            color: white;
+        }
+
+        .credits-earned {
+            font-size: 48px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .credits-label {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        .wallet-section {
+            margin-bottom: 25px;
+        }
+
+        .wallet-label {
+            font-size: 14px;
+            color: #4a5568;
+            margin-bottom: 8px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .wallet-input {
+            width: 100%;
+            padding: 14px 16px;
+            font-size: 14px;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            outline: none;
+            transition: all 0.3s ease;
+            font-family: 'Courier New', monospace;
+        }
+
+        .wallet-input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .wallet-input::placeholder {
+            color: #a0aec0;
+        }
+
         .close-modal-btn {
             padding: 14px 40px;
             font-size: 16px;
@@ -450,6 +501,12 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
         .close-modal-btn:active {
             transform: translateY(0);
+        }
+
+        .close-modal-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
         }
     </style>
 </head>
@@ -497,6 +554,22 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     <span class="stat-value" id="modalTotalTasks">--</span>
                 </div>
             </div>
+
+            <div class="credits-section">
+                <div class="credits-earned" id="creditsEarned">0</div>
+                <div class="credits-label">Credits Earned 💰</div>
+            </div>
+
+            <div class="wallet-section">
+                <div class="wallet-label">Wallet Address (to receive credits)</div>
+                <input 
+                    type="text" 
+                    class="wallet-input" 
+                    id="walletInput" 
+                    placeholder="0x... or your wallet address"
+                    autocomplete="off"
+                >
+            </div>
             
             <button class="close-modal-btn" id="closeModalBtn">Continue</button>
         </div>
@@ -511,6 +584,20 @@ HTML_CONTENT = '''<!DOCTYPE html>
         let timerInterval = null;
         let currentTaskStartTime = null;
         let currentSessionId = null;
+        let creditsEarned = 0;
+
+        // Calculate credits: 1 credit per 15 minutes, rounded to nearest 7 minutes
+        function calculateCredits(durationSeconds) {
+            const durationMinutes = durationSeconds / 60;
+            
+            // Round to nearest 7-minute increment
+            const roundedMinutes = Math.round(durationMinutes / 7) * 7;
+            
+            // Calculate credits (1 credit per 15 minutes)
+            const credits = roundedMinutes / 15;
+            
+            return Math.max(0, credits); // Never negative
+        }
 
         async function loadTasks() {
             try {
@@ -540,6 +627,9 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
             const tasksCompleted = tasks.filter(t => t.done && t.lastSessionId === currentSessionId).length;
             
+            // Calculate credits earned
+            creditsEarned = calculateCredits(sessionDuration);
+            
             // Create session summary
             const sessionData = {
                 sessionId: currentSessionId,
@@ -547,6 +637,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 endTime: new Date().toISOString(),
                 totalDuration: sessionDuration,
                 tasksCompleted: tasksCompleted,
+                creditsEarned: creditsEarned,
                 timestamp: Date.now()
             };
             
@@ -566,12 +657,10 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const completedTasks = tasks.filter(t => t.done);
             if (completedTasks.length > 0) {
                 await archiveToFile(completedTasks);
-                // Backend will handle marking as archived
-                // Just reload tasks to get updated list
                 await loadTasks();
             }
             
-            // Show congratulations modal
+            // Show congratulations modal with credits
             showCongratsModal(sessionDuration, tasksCompleted, tasks.length);
             
             // Reset everything
@@ -606,14 +695,69 @@ HTML_CONTENT = '''<!DOCTYPE html>
             document.getElementById('modalDuration').textContent = formatTime(duration);
             document.getElementById('modalTasksCompleted').textContent = tasksCompleted;
             document.getElementById('modalTotalTasks').textContent = totalTasks;
+            document.getElementById('creditsEarned').textContent = creditsEarned.toFixed(2);
             
             const modal = document.getElementById('congratsModal');
             modal.classList.add('show');
         }
 
-        function closeCongratsModal() {
-            const modal = document.getElementById('congratsModal');
-            modal.classList.remove('show');
+        async function closeCongratsModal() {
+            const walletInput = document.getElementById('walletInput');
+            const walletAddress = walletInput.value.trim();
+            
+            if (!walletAddress) {
+                alert('⚠️ Please enter a wallet address to receive your credits!');
+                walletInput.focus();
+                return;
+            }
+            
+            // Validate basic wallet format (starts with 0x and is long enough)
+            if (!walletAddress.startsWith('0x') || walletAddress.length < 20) {
+                alert('⚠️ Please enter a valid wallet address (should start with 0x)');
+                walletInput.focus();
+                return;
+            }
+            
+            // Disable button during processing
+            const continueBtn = document.getElementById('closeModalBtn');
+            continueBtn.disabled = true;
+            continueBtn.textContent = 'Processing...';
+            
+            try {
+                // Send credits to wallet
+                const response = await fetch('/api/credit-transfer', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        walletAddress: walletAddress,
+                        credits: creditsEarned,
+                        sessionId: currentSessionId || 'unknown'
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    console.log('✅ Credits transferred:', result);
+                    alert(`🎉 Success! ${creditsEarned.toFixed(2)} credits sent to ${walletAddress.slice(0, 10)}...`);
+                    
+                    // Close modal
+                    const modal = document.getElementById('congratsModal');
+                    modal.classList.remove('show');
+                    
+                    // Reset wallet input
+                    walletInput.value = '';
+                    creditsEarned = 0;
+                } else {
+                    alert('❌ Failed to transfer credits. Please try again.');
+                }
+            } catch (error) {
+                console.error('Credit transfer error:', error);
+                alert('❌ Network error. Please check your connection and try again.');
+            } finally {
+                continueBtn.disabled = false;
+                continueBtn.textContent = 'Continue';
+            }
         }
 
         function formatTime(seconds) {
@@ -638,7 +782,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
         }
 
         function startSession() {
-            // Check if there are any tasks
             if (tasks.length === 0) {
                 alert('⚠️ Please add at least one task before starting a session!');
                 return;
@@ -648,18 +791,15 @@ HTML_CONTENT = '''<!DOCTYPE html>
             sessionPaused = false;
             
             if (!sessionStartTime) {
-                // First time starting
                 sessionStartTime = Date.now();
                 currentSessionId = 'session_' + Date.now();
             }
             
             currentTaskStartTime = Date.now();
             
-            // Disable task input
             const inputSection = document.querySelector('.input-section');
             inputSection.classList.add('disabled');
             
-            // Update UI
             document.getElementById('startBtn').classList.add('hidden');
             document.getElementById('stopBtn').classList.remove('hidden');
             document.getElementById('finishBtn').classList.remove('hidden');
@@ -675,12 +815,10 @@ HTML_CONTENT = '''<!DOCTYPE html>
             sessionPaused = true;
             clearInterval(timerInterval);
             
-            // Update start button text
             const startBtn = document.getElementById('startBtn');
             startBtn.textContent = 'Continue Session';
             startBtn.classList.remove('hidden');
             
-            // Hide stop and finish buttons
             document.getElementById('stopBtn').classList.add('hidden');
             document.getElementById('finishBtn').classList.add('hidden');
             
@@ -712,22 +850,18 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     <button class="delete-btn">×</button>
                 `;
                 
-                // Click task to toggle done/undone
                 const taskContent = taskItem.querySelector('.task-content');
                 taskContent.addEventListener('click', () => {
                     if (selectedIndex === index) {
-                        // Toggle task completion
                         const wasUndone = !tasks[index].done;
                         tasks[index].done = !tasks[index].done;
                         
-                        // If marking as done and session is running, record duration
                         if (wasUndone && sessionRunning && currentTaskStartTime) {
                             const actualTime = Math.floor((Date.now() - currentTaskStartTime) / 1000);
                             tasks[index].actualTime = (tasks[index].actualTime || 0) + actualTime;
                             tasks[index].completedAt = new Date().toISOString();
                             tasks[index].lastSessionId = currentSessionId;
                             
-                            // Reset timer for next task
                             currentTaskStartTime = Date.now();
                         }
                         
@@ -739,7 +873,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     }
                 });
                 
-                // Click X to delete
                 const deleteBtn = taskItem.querySelector('.delete-btn');
                 deleteBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -766,16 +899,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const taskText = input.value.trim();
             
             if (taskText) {
-                // Create task with full structure for LLM breakdown
                 const newTask = {
                     task: taskText,
                     done: false,
-                    expectedTime: 0, // Will be set by LLM or user estimate
+                    expectedTime: 0,
                     actualTime: 0,
                     createdAt: new Date().toISOString(),
-                    // These will be filled by LLM:
-                    subtasks: [], // Array of { task: string, expectedTime: 600, actualTime: 0, done: false }
-                    needsBreakdown: true // Flag for LLM to process
+                    subtasks: [],
+                    needsBreakdown: true
                 };
                 
                 tasks.push(newTask);
@@ -839,7 +970,6 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # Get active (non-archived) tasks from MongoDB
             tasks = list(tasks_collection.find(
                 {'archived': False},
                 {'task': 1, 'done': 1, 'expectedTime': 1, 'actualTime': 1,
@@ -847,7 +977,6 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                  'subtasks': 1, 'needsBreakdown': 1}
             ).sort('_id', 1))
             
-            # Convert ObjectId to string for JSON
             for task in tasks:
                 task['id'] = str(task['_id'])
                 del task['_id']
@@ -865,10 +994,8 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 tasks = json.loads(post_data)
                 
-                # Clear existing non-archived tasks
                 tasks_collection.delete_many({'archived': False})
                 
-                # Insert all tasks
                 for task in tasks:
                     task_id = task.pop('id', None)
                     task['archived'] = False
@@ -915,12 +1042,10 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 archived_tasks = archive_data['archived']
                 archived_at = archive_data['archivedAt']
                 
-                # Just mark tasks as archived in tasks collection
                 for task in archived_tasks:
                     if 'id' in task:
                         task_id = task['id']
                         
-                        # Mark as archived in tasks collection
                         tasks_collection.update_one(
                             {'_id': ObjectId(task_id)},
                             {'$set': {
@@ -936,6 +1061,46 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 
             except Exception as e:
                 print(f"Error archiving tasks: {e}")
+                self.send_error(500)
+                
+        elif self.path == '/api/credit-transfer':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            
+            try:
+                transfer_data = json.loads(post_data)
+                wallet_address = transfer_data.get('walletAddress')
+                credits = transfer_data.get('credits', 0)
+                session_id = transfer_data.get('sessionId')
+                
+                # Log the credit transfer
+                credit_record = {
+                    'walletAddress': wallet_address,
+                    'credits': credits,
+                    'sessionId': session_id,
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'pending'
+                }
+                
+                # Store in MongoDB
+                db['credit_transfers'].insert_one(credit_record)
+                
+                # Here you would integrate with actual blockchain/payment API
+                # For now, we'll simulate success
+                print(f"💰 Credit Transfer: {credits} credits → {wallet_address}")
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'credits': credits,
+                    'walletAddress': wallet_address,
+                    'message': 'Credits transferred successfully'
+                }).encode())
+                
+            except Exception as e:
+                print(f"Error transferring credits: {e}")
                 self.send_error(500)
         else:
             self.send_error(404)
