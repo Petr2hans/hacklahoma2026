@@ -8,26 +8,36 @@ Return ONLY valid JSON:
 {{"task_type":"<one of the allowed values>"}}
 """.strip()
 
+# NEW: sections + subtasks in one response
+PROMPT_BREAKDOWN_WITH_SECTIONS = """
+You are a study-planning assistant.
 
-PROMPT_BREAKDOWN = """
-Break the following assignment into actionable study subtasks.
+Create a structured plan for this assignment as SECTIONS, each containing subtasks.
+The student pace multiplier is {pace_multiplier}:
+- < 1.0 means student is faster → reduce times a bit
+- > 1.0 means student is slower → increase times a bit
 
 Assignment title: "{task_title}"
-Student pace multiplier: {pace_multiplier}
-- If pace_multiplier < 1.0, student is faster → reduce times.
-- If pace_multiplier > 1.0, student is slower → increase times.
-
-Make subtasks of about {chunk_seconds} seconds (~{chunk_minutes} minutes) each.
-
-Return ONLY a valid JSON array (no markdown, no commentary).
-Each element MUST be an object with EXACT keys:
-- task (string)
-- expectedTime (integer seconds)
-- actualTime (integer seconds, set 0)
-- done (boolean, set false)
 
 Rules:
-- Keep subtasks actionable and specific.
-- Create 3–12 subtasks for most tasks.
+- Create 2–6 sections.
+- Each section has 2–6 subtasks.
+- Each subtask should be actionable and specific.
+- Target per-subtask time around {chunk_seconds} seconds (~{chunk_minutes} minutes), but allow variation.
+- expectedTime values are IN SECONDS.
+- actualTime must be 0, done must be false.
 - Do not include any extra keys.
+
+Return ONLY valid JSON (no markdown, no commentary) with EXACT structure:
+
+{{
+  "sections": [
+    {{
+      "title": "string",
+      "items": [
+        {{"task":"string","expectedTime":123,"actualTime":0,"done":false}}
+      ]
+    }}
+  ]
+}}
 """.strip()

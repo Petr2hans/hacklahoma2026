@@ -11,29 +11,10 @@ def _strip_code_fences(text: str) -> str:
             t = t[:-3].strip()
     return t
 
-def parse_json_array(text: str) -> List[Dict[str, Any]]:
-    t = _strip_code_fences(text)
-
-    try:
-        data = json.loads(t)
-        if isinstance(data, list):
-            return data
-    except Exception:
-        pass
-
-    start = t.find("[")
-    end = t.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        candidate = t[start:end+1]
-        data = json.loads(candidate)
-        if isinstance(data, list):
-            return data
-
-    raise ValueError("Could not parse a JSON array from model output.")
-
 def parse_json_object(text: str) -> Dict[str, Any]:
     t = _strip_code_fences(text)
 
+    # direct
     try:
         data = json.loads(t)
         if isinstance(data, dict):
@@ -41,6 +22,7 @@ def parse_json_object(text: str) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # extract first {...}
     start = t.find("{")
     end = t.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -50,3 +32,13 @@ def parse_json_object(text: str) -> Dict[str, Any]:
             return data
 
     raise ValueError("Could not parse a JSON object from model output.")
+
+def flatten_sections(sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Convert sections -> flat subtasks list (keeps order).
+    """
+    flat: List[Dict[str, Any]] = []
+    for sec in sections:
+        for item in sec.get("items", []) or []:
+            flat.append(item)
+    return flat

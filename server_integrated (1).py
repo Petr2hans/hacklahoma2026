@@ -6,12 +6,34 @@ import webbrowser
 import threading
 import hashlib
 import secrets
+import asyncio
+import time
 from pymongo import MongoClient
 from bson import ObjectId
 from datetime import datetime
 from http.cookies import SimpleCookie
 
+# Solana imports
+from solana.rpc.async_api import AsyncClient
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.transaction import VersionedTransaction
+from solders.message import MessageV0
+from spl.token.instructions import (
+    get_associated_token_address,
+    create_idempotent_associated_token_account,
+    transfer_checked,
+    TransferCheckedParams
+)
+from spl.token.constants import TOKEN_PROGRAM_ID
+
 PORT = int(os.environ.get('PORT', 8000))
+
+# Solana Configuration
+RPC_URL = "https://api.devnet.solana.com"
+TOKEN_MINT_ADDRESS = os.environ.get('token_address', '')
+RAW_TREASURY_BYTES = os.environ.get('sol_key', b'')
+DECIMALS = 9
 
 # Session storage
 sessions = {}  # {session_token: user_id}
@@ -40,13 +62,157 @@ try:
     sessions_collection.create_index('userId')
     users_collection.create_index('username', unique=True)
     credit_transfers_collection.create_index('userId')
+    credit_transfers_collection.create_index('status')  # NEW: Index for pending transfers
     
     print("✅ Connected to MongoDB Atlas")
     print(f"📊 Database: {DB_NAME}")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
 
-# Authentication helpers
+# ============================================
+# SOLANA PAYMENT SYSTEM
+# ============================================
+
+def validate_solana_address(address: str) -> bool:
+    """Validate Solana wallet address format"""
+    try:
+        if not address or len(address) < 32 or len(address) > 44:
+            return False
+        # Try to create a Pubkey - will throw if invalid
+        Pubkey.from_string(address)
+        return True
+    except Exception:
+        return False
+
+async def send_study_reward(user_wallet_address: str, amount: float, transfer_id: str):
+    """
+    Sends tokens to a user. Handles account creation automatically.
+    Returns transaction hash on success, None on failure.
+    """
+    try:
+        async with AsyncClient(RPC_URL) as client:
+            # 1. Setup Identities
+            treasury = Keypair.from_bytes(bytes(RAW_TREASURY_BYTES))
+            mint = Pubkey.from_string(TOKEN_MINT_ADDRESS)
+            user_pubkey = Pubkey.from_string(user_wallet_address)
+            
+            # 2. Derive Token Accounts (ATAs)
+            source_ata = get_associated_token_address(treasury.pubkey(), mint)
+            dest_ata = get_associated_token_address(user_pubkey, mint)
+            
+            # 3. Create Instructions
+            ix1 = create_idempotent_associated_token_account(treasury.pubkey(), user_pubkey, mint)
+            ix2 = transfer_checked(
+                TransferCheckedParams(
+                    program_id=TOKEN_PROGRAM_ID,
+                    source=source_ata,
+                    dest=dest_ata,
+                    mint=mint,
+                    owner=treasury.pubkey(),
+                    amount=int(amount * (10**DECIMALS)),
+                    decimals=DECIMALS
+                )
+            )
+            
+            # 4. Fetch Blockhash & Compile Message
+            blockhash_resp = await client.get_latest_blockhash()
+            message = MessageV0.try_compile(
+                payer=treasury.pubkey(),
+                instructions=[ix1, ix2],
+                address_lookup_table_accounts=[],
+                recent_blockhash=blockhash_resp.value.blockhash
+            )
+            
+            # 5. Create Signed Transaction
+            tx = VersionedTransaction(message, [treasury])
+            
+            # 6. Send to Blockchain
+            resp = await client.send_transaction(tx)
+            tx_hash = str(resp.value)
+            
+            print(f"✅ [{transfer_id[:8]}] Sent {amount} tokens to {user_wallet_address[:8]}...")
+            print(f"🔗 https://explorer.solana.com/tx/{tx_hash}?cluster=devnet")
+            
+            return tx_hash
+            
+    except Exception as e:
+        print(f"❌ [{transfer_id[:8]}] Payment failed: {e}")
+        return None
+
+def payment_worker():
+    """
+    Background worker that processes pending credit transfers.
+    Runs continuously, checking every 30 seconds.
+    """
+    print("💰 Payment worker started")
+    
+    while True:
+        try:
+            # Find all pending transfers
+            pending_transfers = list(credit_transfers_collection.find(
+                {"status": "pending"}
+            ).limit(10))  # Process max 10 at a time
+            
+            if pending_transfers:
+                print(f"📤 Processing {len(pending_transfers)} pending transfer(s)...")
+            
+            for transfer in pending_transfers:
+                transfer_id = str(transfer['_id'])
+                wallet_address = transfer.get('walletAddress')
+                credits = transfer.get('credits', 0)
+                
+                # Validate wallet address
+                if not validate_solana_address(wallet_address):
+                    print(f"❌ [{transfer_id[:8]}] Invalid wallet address: {wallet_address}")
+                    credit_transfers_collection.update_one(
+                        {"_id": transfer['_id']},
+                        {"$set": {
+                            "status": "failed",
+                            "error": "Invalid wallet address",
+                            "processedAt": datetime.now().isoformat()
+                        }}
+                    )
+                    continue
+                
+                # Mark as processing
+                credit_transfers_collection.update_one(
+                    {"_id": transfer['_id']},
+                    {"$set": {"status": "processing"}}
+                )
+                
+                # Send the payment
+                tx_hash = asyncio.run(send_study_reward(wallet_address, credits, transfer_id))
+                
+                # Update status based on result
+                if tx_hash:
+                    credit_transfers_collection.update_one(
+                        {"_id": transfer['_id']},
+                        {"$set": {
+                            "status": "completed",
+                            "transactionHash": tx_hash,
+                            "processedAt": datetime.now().isoformat()
+                        }}
+                    )
+                else:
+                    credit_transfers_collection.update_one(
+                        {"_id": transfer['_id']},
+                        {"$set": {
+                            "status": "failed",
+                            "error": "Transaction failed",
+                            "processedAt": datetime.now().isoformat()
+                        }}
+                    )
+            
+        except Exception as e:
+            print(f"❌ Payment worker error: {e}")
+        
+        # Wait 30 seconds before next check
+        time.sleep(30)
+
+# ============================================
+# AUTHENTICATION HELPERS
+# ============================================
+
 def hash_password(password):
     salt = secrets.token_hex(16)
     pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
@@ -67,14 +233,17 @@ def create_session(user_id):
 def get_user_from_session(session_token):
     return sessions.get(session_token)
 
-# Task breakdown function (placeholder - integrate your Gemini logic here)
+# ============================================
+# TASK BREAKDOWN (Placeholder for Friend 1)
+# ============================================
+
 def breakdown_task(task_title, user_id):
     """
-    TODO: Replace this with your actual Gemini breakdown logic from workers_breakdown.py
+    TODO: Replace this with your actual Gemini breakdown logic from Friend 1
     
     For now, returns a simple example breakdown
     """
-    # Your actual implementation would call:
+    # Your Friend 1's implementation would go here
     # from workers_breakdown import breakdown_one_task
     # sections, flat, task_type, pace = breakdown_one_task(user_id, doc)
     
@@ -125,6 +294,10 @@ def breakdown_task(task_title, user_id):
         "taskType": "other",
         "paceMultiplier": 1.0
     }
+
+# ============================================
+# HTML CONTENT (Login, Register, Main App)
+# ============================================
 
 # Login page HTML
 LOGIN_HTML = '''<!DOCTYPE html>
@@ -965,6 +1138,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
 
+        .wallet-error {
+            font-size: 12px;
+            color: #f56565;
+            margin-top: 6px;
+            text-align: left;
+            display: none;
+        }
+
         .close-modal-btn {
             padding: 14px 40px;
             font-size: 16px;
@@ -1037,17 +1218,18 @@ HTML_CONTENT = '''<!DOCTYPE html>
             </div>
 
             <div class="wallet-section">
-                <div class="wallet-label">Wallet Address (to receive credits)</div>
+                <div class="wallet-label">Solana Wallet Address (to receive tokens)</div>
                 <input 
                     type="text" 
                     class="wallet-input" 
                     id="walletInput" 
-                    placeholder="Enter your wallet address (any crypto)"
+                    placeholder="Enter your Solana wallet address"
                     autocomplete="off"
                 >
+                <div class="wallet-error" id="walletError">Please enter a valid Solana wallet address (32-44 characters)</div>
             </div>
             
-            <button class="close-modal-btn" id="closeModalBtn">Continue</button>
+            <button class="close-modal-btn" id="closeModalBtn">Queue Payment</button>
         </div>
     </div>
 
@@ -1069,6 +1251,16 @@ HTML_CONTENT = '''<!DOCTYPE html>
         function calculateCredits(durationSeconds) {
             // 1 credit per 15 SECONDS
             return durationSeconds / 15;
+        }
+
+        function validateSolanaAddress(address) {
+            // Basic Solana address validation
+            if (!address || address.length < 32 || address.length > 44) {
+                return false;
+            }
+            // Check if it's base58 (alphanumeric, no 0, O, I, l)
+            const base58Regex = /^[1-9A-HJ-NP-Za-km-z]+$/;
+            return base58Regex.test(address);
         }
 
         async function loadTasks() {
@@ -1104,7 +1296,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 const result = await response.json();
                 
                 if (result.success) {
-                    // Reload tasks to get updated breakdown
                     await loadTasks();
                 }
             } catch (error) {
@@ -1135,7 +1326,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const subtask = task.sections[sectionIndex].items[subtaskIndex];
             subtask.done = !subtask.done;
             
-            // Check if all subtasks in all sections are done
             let allDone = true;
             for (const section of task.sections) {
                 for (const item of section.items) {
@@ -1183,8 +1373,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 taskDiv.id = `task-${index}`;
                 
                 const hasSubtasks = task.sections && task.sections.length > 0;
-                const subtasksCount = hasSubtasks ? 
-                    task.sections.reduce((sum, sec) => sum + sec.items.length, 0) : 0;
                 
                 let subtasksHTML = '';
                 if (hasSubtasks) {
@@ -1244,16 +1432,15 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     expectedTime: 0,
                     actualTime: 0,
                     createdAt: new Date().toISOString(),
-                    needsBreakdown: true,  // Flag for breakdown
+                    needsBreakdown: true,
                     sections: null,
                     subtasks: []
                 };
                 
                 tasks.push(newTask);
                 await saveTasks();
-                await loadTasks();  // Reload to get the task ID
+                await loadTasks();
                 
-                // Find the newly added task and request breakdown
                 const addedTask = tasks.find(t => t.task === taskText && t.needsBreakdown);
                 if (addedTask && addedTask.id) {
                     requestBreakdown(addedTask.id);
@@ -1304,7 +1491,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
             
             sessionRunning = false;
             sessionStartTime = null;
-            currentSessionId = null;
+            
             clearInterval(timerInterval);
             
             document.getElementById('startBtn').textContent = 'Start Session';
@@ -1328,17 +1515,21 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
         async function closeCongratsModal() {
             const walletInput = document.getElementById('walletInput');
+            const walletError = document.getElementById('walletError');
             const walletAddress = walletInput.value.trim();
             
-            if (!walletAddress) {
-                alert('⚠️ Please enter a wallet address!');
+            // Validate wallet address
+            if (!validateSolanaAddress(walletAddress)) {
+                walletError.style.display = 'block';
                 walletInput.focus();
                 return;
             }
             
+            walletError.style.display = 'none';
+            
             const continueBtn = document.getElementById('closeModalBtn');
             continueBtn.disabled = true;
-            continueBtn.textContent = 'Processing...';
+            continueBtn.textContent = 'Queueing...';
             
             try {
                 const response = await fetch('/api/credit-transfer', {
@@ -1354,19 +1545,23 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 const result = await response.json();
                 
                 if (result.success) {
-                    alert(`🎉 Success! ${creditsEarned.toFixed(2)} credits sent!`);
+                    alert(`✅ Success! ${creditsEarned.toFixed(2)} credits queued for payment.\n\nPayment will be processed within 30 seconds and sent to:\n${walletAddress.substring(0, 8)}...${walletAddress.substring(walletAddress.length - 6)}`);
                     
                     const modal = document.getElementById('congratsModal');
                     modal.classList.remove('show');
                     
                     walletInput.value = '';
                     creditsEarned = 0;
+                    currentSessionId = null;
+                } else {
+                    alert('❌ Failed to queue payment. Please try again.');
                 }
             } catch (error) {
                 console.error('Credit transfer error:', error);
+                alert('❌ Network error. Please try again.');
             } finally {
                 continueBtn.disabled = false;
-                continueBtn.textContent = 'Continue';
+                continueBtn.textContent = 'Queue Payment';
             }
         }
 
@@ -1411,6 +1606,20 @@ HTML_CONTENT = '''<!DOCTYPE html>
             document.getElementById('timerDisplay').classList.remove('running');
         }
 
+        // Add wallet input validation on typing
+        document.addEventListener('DOMContentLoaded', () => {
+            const walletInput = document.getElementById('walletInput');
+            const walletError = document.getElementById('walletError');
+            
+            walletInput.addEventListener('input', () => {
+                if (walletInput.value.trim() && !validateSolanaAddress(walletInput.value.trim())) {
+                    walletError.style.display = 'block';
+                } else {
+                    walletError.style.display = 'none';
+                }
+            });
+        });
+
         document.getElementById('addBtn').addEventListener('click', addTask);
         document.getElementById('taskInput').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') addTask();
@@ -1426,6 +1635,9 @@ HTML_CONTENT = '''<!DOCTYPE html>
 </html>
 '''
 
+# ============================================
+# JSON ENCODER
+# ============================================
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -1434,6 +1646,10 @@ class JSONEncoder(json.JSONEncoder):
         if isinstance(obj, datetime):
             return obj.isoformat()
         return super().default(obj)
+
+# ============================================
+# HTTP REQUEST HANDLER
+# ============================================
 
 class TodoHandler(http.server.SimpleHTTPRequestHandler):
     def get_session_token(self):
@@ -1660,7 +1876,6 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 data = json.loads(post_data)
                 task_id = data.get('taskId')
                 
-                # Get the task
                 task = tasks_collection.find_one({
                     '_id': ObjectId(task_id),
                     'userId': user_id
@@ -1670,10 +1885,9 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_error(404)
                     return
                 
-                # Call breakdown function
+                # Call breakdown function (Friend 1's code will go here)
                 breakdown_result = breakdown_task(task['task'], user_id)
                 
-                # Update task with breakdown
                 tasks_collection.update_one(
                     {'_id': ObjectId(task_id)},
                     {'$set': {
@@ -1725,22 +1939,34 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             
             try:
                 transfer_data = json.loads(post_data)
-                wallet_address = transfer_data.get('walletAddress')
-                credits = transfer_data.get('credits', 0)
+                wallet_address = transfer_data.get('walletAddress', '').strip()
+                credits = float(transfer_data.get('credits', 0))
                 session_id = transfer_data.get('sessionId')
                 
+                # Validate wallet address
+                if not validate_solana_address(wallet_address):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': False,
+                        'message': 'Invalid Solana wallet address'
+                    }).encode())
+                    return
+                
+                # Create credit transfer record
                 credit_record = {
                     'userId': user_id,
                     'walletAddress': wallet_address,
                     'credits': credits,
                     'sessionId': session_id,
                     'timestamp': datetime.now().isoformat(),
-                    'status': 'pending'
+                    'status': 'pending'  # Payment worker will process this
                 }
                 
-                credit_transfers_collection.insert_one(credit_record)
+                result = credit_transfers_collection.insert_one(credit_record)
                 
-                print(f"💰 Credit Transfer: {credits} credits → {wallet_address}")
+                print(f"💳 Credit transfer queued: {credits:.2f} credits → {wallet_address[:8]}... (ID: {result.inserted_id})")
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -1749,11 +1975,11 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                     'success': True,
                     'credits': credits,
                     'walletAddress': wallet_address,
-                    'message': 'Credits transferred successfully'
+                    'message': 'Payment queued successfully'
                 }).encode())
                 
             except Exception as e:
-                print(f"Error transferring credits: {e}")
+                print(f"Error queueing credit transfer: {e}")
                 self.send_error(500)
         else:
             self.send_error(404)
@@ -1761,22 +1987,35 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+# ============================================
+# SERVER STARTUP
+# ============================================
+
 def open_browser():
     webbrowser.open(f'http://localhost:{PORT}')
 
 if __name__ == '__main__':
+    # Start payment worker in background thread
+    worker_thread = threading.Thread(target=payment_worker, daemon=True)
+    worker_thread.start()
+    print("💰 Payment worker thread started")
+    
     with socketserver.TCPServer(("0.0.0.0", PORT), TodoHandler) as httpd:
-        print(f"✨ To-Do App running at http://localhost:{PORT}")
+        print(f"\n{'='*60}")
+        print(f"✨ To-Do App with Solana Rewards")
+        print(f"{'='*60}")
+        print(f"🌐 Server: http://localhost:{PORT}")
         print(f"📊 Database: MongoDB Atlas - {DB_NAME}")
-        print(f"🔐 Authentication: Enabled")
-        print(f"🤖 Task Breakdown: Enabled")
+        print(f"🔐 Auth: Enabled")
+        print(f"🤖 Task Breakdown: Ready (placeholder)")
+        print(f"💰 Solana Payments: Active (background worker)")
+        print(f"🔗 Network: Solana Devnet")
+        print(f"{'='*60}\n")
         
         if os.environ.get('PORT') is None:
             print("🌐 Opening browser...")
             threading.Timer(1.0, open_browser).start()
-        else:
-            print(f"🌐 Server running on port {PORT}")
-            
+        
         print("Press Ctrl+C to stop\n")
         
         try:

@@ -1,0 +1,17 @@
+# Core dependencies
+pymongo==4.6.1
+
+# Solana dependencies
+# Using flexible versioning to avoid package conflicts
+solana>=0.30.0,<1.0.0
+solders>=0.20.0,<1.0.0
+
+# Note: SPL Token functionality is included in the solana package above
+# If you get import errors, run: python test_imports.py
+
+# Gemini AI integration uses only built-in Python libraries:
+# - urllib.request, urllib.parse, json, uuid, time, typing
+
+# Other built-in Python modules (no install needed):
+# - http.server, socketserver, os, webbrowser
+# - threading, hashlib, secrets, asyncio, datetime
