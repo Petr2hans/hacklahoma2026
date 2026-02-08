@@ -1014,9 +1014,8 @@ HTML_CONTENT = '''<!DOCTYPE html>
         }
 
         function calculateCredits(durationSeconds) {
-            const durationMinutes = durationSeconds / 60;
-            const roundedMinutes = Math.round(durationMinutes / 7) * 7;
-            const credits = roundedMinutes / 15;
+            // 1 credit per 15 SECONDS
+            const credits = durationSeconds / 15;
             return Math.max(0, credits);
         }
 
