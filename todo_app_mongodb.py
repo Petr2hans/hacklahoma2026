@@ -11,12 +11,18 @@ from datetime import datetime
 PORT = int(os.environ.get('PORT', 8000))
 
 # MongoDB Atlas connection
-MONGODB_URI = os.environ['MONGODB_URI']
+MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
 DB_NAME = 'todo_app'
 
 # Initialize MongoDB
+print(f"🔍 Attempting to connect to MongoDB...")
+print(f"🔍 MONGODB_URI present: {bool(os.environ.get('MONGODB_URI'))}")
+
 try:
-    client = MongoClient(MONGODB_URI)
+    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+    # Test the connection
+    client.admin.command('ping')
+    
     db = client[DB_NAME]
     tasks_collection = db['tasks']
     sessions_collection = db['sessions']
@@ -30,8 +36,10 @@ try:
     archived_tasks_collection.create_index('archived_at')
     
     print("✅ Connected to MongoDB Atlas")
+    print(f"📊 Database: {DB_NAME}")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
+    print(f"❌ Error type: {type(e).__name__}")
     print("Set MONGODB_URI environment variable with your Atlas connection string")
 
 # HTML content embedded
@@ -923,7 +931,7 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 archived_tasks = archive_data['archived']
                 archived_at = archive_data['archivedAt']
                 
-                # Move tasks to archived_tasks collection with session info
+                # Copy tasks to archived_tasks collection with session info
                 for task in archived_tasks:
                     if 'id' in task:
                         task_id = task['id']
@@ -944,6 +952,14 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                         # Insert into archived_tasks collection
                         archived_tasks_collection.insert_one(archived_doc)
                         
+                        # Mark as archived in tasks collection (keep it there!)
+                        tasks_collection.update_one(
+                            {'_id': ObjectId(task_id)},
+                            {'$set': {
+                                'archived': True,
+                                'archivedAt': archived_at
+                            }}
+                        )
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
