@@ -13,16 +13,14 @@ from http.cookies import SimpleCookie
 
 PORT = int(os.environ.get('PORT', 8000))
 
-# Session storage (in production, use Redis or MongoDB)
+# Session storage
 sessions = {}  # {session_token: user_id}
 
 # MongoDB Atlas connection
 MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
 DB_NAME = 'todo_app'
 
-# Initialize MongoDB
 print(f"🔍 Attempting to connect to MongoDB...")
-print(f"🔍 MONGODB_URI present: {bool(os.environ.get('MONGODB_URI'))}")
 
 try:
     client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
@@ -47,18 +45,14 @@ try:
     print(f"📊 Database: {DB_NAME}")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
-    print(f"❌ Error type: {type(e).__name__}")
-    print("Set MONGODB_URI environment variable with your Atlas connection string")
 
 # Authentication helpers
 def hash_password(password):
-    """Hash password using SHA-256 with salt"""
     salt = secrets.token_hex(16)
     pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
     return f"{salt}${pwd_hash}"
 
 def verify_password(password, hashed):
-    """Verify password against hash"""
     try:
         salt, pwd_hash = hashed.split('$')
         return hashlib.sha256((password + salt).encode()).hexdigest() == pwd_hash
@@ -66,14 +60,71 @@ def verify_password(password, hashed):
         return False
 
 def create_session(user_id):
-    """Create new session token"""
     token = secrets.token_urlsafe(32)
     sessions[token] = str(user_id)
     return token
 
 def get_user_from_session(session_token):
-    """Get user ID from session token"""
     return sessions.get(session_token)
+
+# Task breakdown function (placeholder - integrate your Gemini logic here)
+def breakdown_task(task_title, user_id):
+    """
+    TODO: Replace this with your actual Gemini breakdown logic from workers_breakdown.py
+    
+    For now, returns a simple example breakdown
+    """
+    # Your actual implementation would call:
+    # from workers_breakdown import breakdown_one_task
+    # sections, flat, task_type, pace = breakdown_one_task(user_id, doc)
+    
+    # Example breakdown structure
+    return {
+        "sections": [
+            {
+                "title": "Getting Started",
+                "expectedTime": 900,  # 15 min
+                "items": [
+                    {
+                        "id": "st_1_abc123",
+                        "task": f"Research and gather materials for: {task_title}",
+                        "expectedTime": 600,
+                        "actualTime": 0,
+                        "done": False
+                    },
+                    {
+                        "id": "st_2_def456",
+                        "task": "Create outline or plan",
+                        "expectedTime": 300,
+                        "actualTime": 0,
+                        "done": False
+                    }
+                ]
+            },
+            {
+                "title": "Main Work",
+                "expectedTime": 1800,  # 30 min
+                "items": [
+                    {
+                        "id": "st_3_ghi789",
+                        "task": "Complete main portion of the work",
+                        "expectedTime": 1200,
+                        "actualTime": 0,
+                        "done": False
+                    },
+                    {
+                        "id": "st_4_jkl012",
+                        "task": "Review and refine",
+                        "expectedTime": 600,
+                        "actualTime": 0,
+                        "done": False
+                    }
+                ]
+            }
+        ],
+        "taskType": "other",
+        "paceMultiplier": 1.0
+    }
 
 # Login page HTML
 LOGIN_HTML = '''<!DOCTYPE html>
@@ -154,9 +205,6 @@ LOGIN_HTML = '''<!DOCTYPE html>
             transform: translateY(-2px);
             box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
         }
-        .btn:active {
-            transform: translateY(0);
-        }
         .error {
             background: #fed7d7;
             color: #c53030;
@@ -176,9 +224,6 @@ LOGIN_HTML = '''<!DOCTYPE html>
             color: #667eea;
             text-decoration: none;
             font-weight: 600;
-        }
-        .link a:hover {
-            text-decoration: underline;
         }
     </style>
 </head>
@@ -322,26 +367,20 @@ REGISTER_HTML = '''<!DOCTYPE html>
             transform: translateY(-2px);
             box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
         }
-        .btn:active {
-            transform: translateY(0);
+        .error, .success {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: none;
         }
         .error {
             background: #fed7d7;
             color: #c53030;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            display: none;
         }
         .success {
             background: #c6f6d5;
             color: #22543d;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            display: none;
         }
         .link {
             text-align: center;
@@ -353,9 +392,6 @@ REGISTER_HTML = '''<!DOCTYPE html>
             color: #667eea;
             text-decoration: none;
             font-weight: 600;
-        }
-        .link a:hover {
-            text-decoration: underline;
         }
         .hint {
             font-size: 12px;
@@ -436,13 +472,13 @@ REGISTER_HTML = '''<!DOCTYPE html>
 </html>
 '''
 
-# Main app HTML (same as before, but loads for authenticated users only)
+# Main app HTML with SUBTASKS UI
 HTML_CONTENT = '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>To-Do List</title>
+    <title>To-Do List with Breakdown</title>
     <style>
         * {
             margin: 0;
@@ -465,7 +501,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             width: 100%;
-            max-width: 500px;
+            max-width: 600px;
             padding: 40px;
             position: relative;
         }
@@ -542,33 +578,11 @@ HTML_CONTENT = '''<!DOCTYPE html>
             box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
         }
 
-        #addBtn:active {
-            transform: scale(0.95);
-        }
-
         .tasks-section {
             margin-bottom: 25px;
-            max-height: 350px;
+            max-height: 450px;
             overflow-y: auto;
             padding-right: 5px;
-        }
-
-        .tasks-section::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        .tasks-section::-webkit-scrollbar-track {
-            background: #f1f1f1;
-            border-radius: 10px;
-        }
-
-        .tasks-section::-webkit-scrollbar-thumb {
-            background: #cbd5e0;
-            border-radius: 10px;
-        }
-
-        .tasks-section::-webkit-scrollbar-thumb:hover {
-            background: #a0aec0;
         }
 
         .task-item {
@@ -576,12 +590,8 @@ HTML_CONTENT = '''<!DOCTYPE html>
             padding: 16px 20px;
             margin-bottom: 10px;
             border-radius: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
             transition: all 0.3s ease;
             border: 2px solid transparent;
-            cursor: pointer;
         }
 
         .task-item:hover {
@@ -589,20 +599,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
             background: #edf2f7;
         }
 
-        .task-item:hover .delete-btn {
-            opacity: 1;
+        .task-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
         }
 
-        .task-item.selected {
-            background: #e6f0ff;
-            border-color: #667eea;
-        }
-
-        .task-item.completed {
-            opacity: 0.6;
-        }
-
-        .task-content {
+        .task-main {
             display: flex;
             align-items: center;
             gap: 12px;
@@ -617,12 +621,34 @@ HTML_CONTENT = '''<!DOCTYPE html>
         .task-text {
             font-size: 16px;
             color: #2d3748;
+            font-weight: 600;
             flex: 1;
         }
 
-        .task-item.completed .task-text {
-            text-decoration: line-through;
-            color: #a0aec0;
+        .task-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .expand-btn {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #667eea;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .expand-btn:hover {
+            background: #5568d3;
+            transform: scale(1.1);
         }
 
         .delete-btn {
@@ -639,7 +665,10 @@ HTML_CONTENT = '''<!DOCTYPE html>
             justify-content: center;
             transition: all 0.2s ease;
             opacity: 0;
-            flex-shrink: 0;
+        }
+
+        .task-item:hover .delete-btn {
+            opacity: 1;
         }
 
         .delete-btn:hover {
@@ -647,8 +676,98 @@ HTML_CONTENT = '''<!DOCTYPE html>
             transform: scale(1.2);
         }
 
-        .delete-btn:active {
-            transform: scale(0.9);
+        /* Subtasks Section */
+        .subtasks-container {
+            display: none;
+            margin-top: 15px;
+            padding-left: 36px;
+        }
+
+        .subtasks-container.expanded {
+            display: block;
+        }
+
+        .section-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: #667eea;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 10px;
+            margin-top: 15px;
+        }
+
+        .section-title:first-child {
+            margin-top: 0;
+        }
+
+        .subtask-item {
+            background: white;
+            padding: 10px 14px;
+            margin-bottom: 6px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid #e2e8f0;
+            transition: all 0.2s ease;
+        }
+
+        .subtask-item:hover {
+            border-color: #667eea;
+            background: #f7fafc;
+        }
+
+        .subtask-checkbox {
+            width: 18px;
+            height: 18px;
+            border: 2px solid #cbd5e0;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .subtask-checkbox.checked {
+            background: #48bb78;
+            border-color: #48bb78;
+        }
+
+        .subtask-checkbox.checked::after {
+            content: '✓';
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .subtask-text {
+            flex: 1;
+            font-size: 14px;
+            color: #4a5568;
+        }
+
+        .subtask-item.done .subtask-text {
+            text-decoration: line-through;
+            color: #a0aec0;
+        }
+
+        .subtask-time {
+            font-size: 11px;
+            color: #a0aec0;
+            font-weight: 500;
+        }
+
+        .breakdown-status {
+            font-size: 12px;
+            color: #718096;
+            margin-top: 8px;
+            font-style: italic;
+        }
+
+        .breakdown-status.loading {
+            color: #667eea;
         }
 
         .empty-state {
@@ -699,10 +818,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             box-shadow: 0 6px 20px rgba(72, 187, 120, 0.4);
         }
 
-        .session-btn:active {
-            transform: translateY(0);
-        }
-
         .stop-btn {
             padding: 0;
             font-size: 14px;
@@ -712,11 +827,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             cursor: pointer;
             transition: all 0.2s ease;
             color: #718096;
-            text-decoration: none;
-        }
-
-        .stop-btn:hover {
-            color: #4a5568;
         }
 
         .finish-btn {
@@ -731,28 +841,8 @@ HTML_CONTENT = '''<!DOCTYPE html>
             background: linear-gradient(135deg, #f56565 0%, #e53e3e 100%);
         }
 
-        .finish-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(245, 101, 101, 0.4);
-        }
-
-        .finish-btn:active {
-            transform: translateY(0);
-        }
-
         .hidden {
             display: none;
-        }
-
-        .disabled {
-            opacity: 0.5;
-            pointer-events: none;
-        }
-
-        .task-duration {
-            font-size: 12px;
-            color: #a0aec0;
-            margin-left: 8px;
         }
 
         /* Modal styles */
@@ -798,12 +888,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
         .congrats-emoji {
             font-size: 80px;
             margin-bottom: 20px;
-            animation: bounce 1s ease infinite;
-        }
-
-        @keyframes bounce {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-15px); }
         }
 
         .congrats-title {
@@ -817,7 +901,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             font-size: 18px;
             color: #718096;
             margin-bottom: 30px;
-            line-height: 1.6;
         }
 
         .session-stats {
@@ -831,17 +914,8 @@ HTML_CONTENT = '''<!DOCTYPE html>
         .stat-row {
             display: flex;
             justify-content: space-between;
-            align-items: center;
             margin-bottom: 12px;
             font-size: 16px;
-        }
-
-        .stat-row:last-child {
-            margin-bottom: 0;
-        }
-
-        .stat-label {
-            opacity: 0.9;
         }
 
         .stat-value {
@@ -861,11 +935,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             font-size: 48px;
             font-weight: 700;
             margin-bottom: 8px;
-        }
-
-        .credits-label {
-            font-size: 16px;
-            opacity: 0.9;
         }
 
         .wallet-section {
@@ -896,10 +965,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
 
-        .wallet-input::placeholder {
-            color: #a0aec0;
-        }
-
         .close-modal-btn {
             padding: 14px 40px;
             font-size: 16px;
@@ -917,14 +982,9 @@ HTML_CONTENT = '''<!DOCTYPE html>
             box-shadow: 0 6px 20px rgba(72, 187, 120, 0.4);
         }
 
-        .close-modal-btn:active {
-            transform: translateY(0);
-        }
-
         .close-modal-btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
-            transform: none;
         }
     </style>
 </head>
@@ -958,26 +1018,22 @@ HTML_CONTENT = '''<!DOCTYPE html>
         <div class="modal-content">
             <div class="congrats-emoji">🎉</div>
             <h2 class="congrats-title">Great Work!</h2>
-            <p class="congrats-message">You've completed your focus session. Here's what you accomplished:</p>
+            <p class="congrats-message">You've completed your focus session!</p>
             
             <div class="session-stats">
                 <div class="stat-row">
-                    <span class="stat-label">Session Duration</span>
+                    <span>Session Duration</span>
                     <span class="stat-value" id="modalDuration">--</span>
                 </div>
                 <div class="stat-row">
-                    <span class="stat-label">Tasks Completed</span>
+                    <span>Tasks Completed</span>
                     <span class="stat-value" id="modalTasksCompleted">--</span>
-                </div>
-                <div class="stat-row">
-                    <span class="stat-label">Total Tasks</span>
-                    <span class="stat-value" id="modalTotalTasks">--</span>
                 </div>
             </div>
 
             <div class="credits-section">
                 <div class="credits-earned" id="creditsEarned">0</div>
-                <div class="credits-label">Credits Earned 💰</div>
+                <div>Credits Earned 💰</div>
             </div>
 
             <div class="wallet-section">
@@ -997,12 +1053,9 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
     <script>
         let tasks = [];
-        let selectedIndex = null;
         let sessionRunning = false;
-        let sessionPaused = false;
         let sessionStartTime = null;
         let timerInterval = null;
-        let currentTaskStartTime = null;
         let currentSessionId = null;
         let creditsEarned = 0;
 
@@ -1015,8 +1068,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
         function calculateCredits(durationSeconds) {
             // 1 credit per 15 SECONDS
-            const credits = durationSeconds / 15;
-            return Math.max(0, credits);
+            return durationSeconds / 15;
         }
 
         async function loadTasks() {
@@ -1041,11 +1093,190 @@ HTML_CONTENT = '''<!DOCTYPE html>
             }
         }
 
+        async function requestBreakdown(taskId) {
+            try {
+                const response = await fetch('/api/breakdown', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ taskId })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Reload tasks to get updated breakdown
+                    await loadTasks();
+                }
+            } catch (error) {
+                console.error('Breakdown failed:', error);
+            }
+        }
+
+        function toggleSubtasks(taskIndex) {
+            const task = tasks[taskIndex];
+            const container = document.querySelector(`#task-${taskIndex} .subtasks-container`);
+            const expandBtn = document.querySelector(`#task-${taskIndex} .expand-btn`);
+            
+            if (!container) return;
+            
+            if (container.classList.contains('expanded')) {
+                container.classList.remove('expanded');
+                expandBtn.textContent = '▼';
+            } else {
+                container.classList.add('expanded');
+                expandBtn.textContent = '▲';
+            }
+        }
+
+        function toggleSubtask(taskIndex, sectionIndex, subtaskIndex) {
+            const task = tasks[taskIndex];
+            if (!task.sections || !task.sections[sectionIndex]) return;
+            
+            const subtask = task.sections[sectionIndex].items[subtaskIndex];
+            subtask.done = !subtask.done;
+            
+            // Check if all subtasks in all sections are done
+            let allDone = true;
+            for (const section of task.sections) {
+                for (const item of section.items) {
+                    if (!item.done) {
+                        allDone = false;
+                        break;
+                    }
+                }
+                if (!allDone) break;
+            }
+            
+            task.done = allDone;
+            saveTasks();
+            renderTasks();
+        }
+
+        function formatTime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+
+        function formatDuration(seconds) {
+            if (seconds < 60) return `${seconds}s`;
+            const m = Math.floor(seconds / 60);
+            if (m < 60) return `${m}m`;
+            const h = Math.floor(m / 60);
+            const rm = m % 60;
+            return `${h}h ${rm}m`;
+        }
+
+        function renderTasks() {
+            const tasksList = document.getElementById('tasksList');
+            
+            if (tasks.length === 0) {
+                tasksList.innerHTML = '<div class="empty-state">No tasks yet. Add one above!</div>';
+                return;
+            }
+
+            tasksList.innerHTML = '';
+            tasks.forEach((task, index) => {
+                const taskDiv = document.createElement('div');
+                taskDiv.className = 'task-item';
+                taskDiv.id = `task-${index}`;
+                
+                const hasSubtasks = task.sections && task.sections.length > 0;
+                const subtasksCount = hasSubtasks ? 
+                    task.sections.reduce((sum, sec) => sum + sec.items.length, 0) : 0;
+                
+                let subtasksHTML = '';
+                if (hasSubtasks) {
+                    subtasksHTML = '<div class="subtasks-container">';
+                    
+                    task.sections.forEach((section, sIdx) => {
+                        subtasksHTML += `<div class="section-title">${escapeHtml(section.title)}</div>`;
+                        
+                        section.items.forEach((subtask, stIdx) => {
+                            subtasksHTML += `
+                                <div class="subtask-item ${subtask.done ? 'done' : ''}" onclick="toggleSubtask(${index}, ${sIdx}, ${stIdx})">
+                                    <div class="subtask-checkbox ${subtask.done ? 'checked' : ''}"></div>
+                                    <div class="subtask-text">${escapeHtml(subtask.task)}</div>
+                                    <div class="subtask-time">${formatDuration(subtask.expectedTime)}</div>
+                                </div>
+                            `;
+                        });
+                    });
+                    
+                    subtasksHTML += '</div>';
+                } else if (task.needsBreakdown) {
+                    subtasksHTML = '<div class="subtasks-container"><div class="breakdown-status loading">⏳ Breaking down task...</div></div>';
+                }
+                
+                taskDiv.innerHTML = `
+                    <div class="task-header">
+                        <div class="task-main">
+                            <span class="task-checkbox">${task.done ? '✓' : '○'}</span>
+                            <span class="task-text">${escapeHtml(task.task)}</span>
+                        </div>
+                        <div class="task-actions">
+                            ${hasSubtasks ? `<button class="expand-btn" onclick="toggleSubtasks(${index})">▼</button>` : ''}
+                            <button class="delete-btn" onclick="deleteTask(${index})">×</button>
+                        </div>
+                    </div>
+                    ${subtasksHTML}
+                `;
+                
+                tasksList.appendChild(taskDiv);
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function addTask() {
+            const input = document.getElementById('taskInput');
+            const taskText = input.value.trim();
+            
+            if (taskText) {
+                const newTask = {
+                    task: taskText,
+                    done: false,
+                    expectedTime: 0,
+                    actualTime: 0,
+                    createdAt: new Date().toISOString(),
+                    needsBreakdown: true,  // Flag for breakdown
+                    sections: null,
+                    subtasks: []
+                };
+                
+                tasks.push(newTask);
+                await saveTasks();
+                await loadTasks();  // Reload to get the task ID
+                
+                // Find the newly added task and request breakdown
+                const addedTask = tasks.find(t => t.task === taskText && t.needsBreakdown);
+                if (addedTask && addedTask.id) {
+                    requestBreakdown(addedTask.id);
+                }
+                
+                input.value = '';
+                input.focus();
+            }
+        }
+
+        function deleteTask(index) {
+            if (confirm(`Delete task: "${tasks[index].task}"?`)) {
+                tasks.splice(index, 1);
+                saveTasks();
+                renderTasks();
+            }
+        }
+
         async function endSession() {
             if (!sessionStartTime) return;
             
             const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
-            const tasksCompleted = tasks.filter(t => t.done && t.lastSessionId === currentSessionId).length;
+            const tasksCompleted = tasks.filter(t => t.done).length;
             
             creditsEarned = calculateCredits(sessionDuration);
             
@@ -1065,47 +1296,30 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(sessionData)
                 });
-                console.log('Session ended:', sessionData);
             } catch (error) {
                 console.error('Failed to save session:', error);
             }
             
-            const completedTasks = tasks.filter(t => t.done);
-            if (completedTasks.length > 0) {
-                await archiveToFile(completedTasks);
-                await loadTasks();
-            }
-            
-            showCongratsModal(sessionDuration, tasksCompleted, tasks.length);
+            showCongratsModal(sessionDuration, tasksCompleted);
             
             sessionRunning = false;
-            sessionPaused = false;
             sessionStartTime = null;
-            currentTaskStartTime = null;
             currentSessionId = null;
             clearInterval(timerInterval);
             
-            const inputSection = document.querySelector('.input-section');
-            inputSection.classList.remove('disabled');
-            
-            const startBtn = document.getElementById('startBtn');
-            startBtn.textContent = 'Start Session';
-            startBtn.classList.remove('hidden');
-            
+            document.getElementById('startBtn').textContent = 'Start Session';
+            document.getElementById('startBtn').classList.remove('hidden');
             document.getElementById('stopBtn').classList.add('hidden');
             document.getElementById('finishBtn').classList.add('hidden');
             
             const display = document.getElementById('timerDisplay');
             display.classList.remove('running');
             display.textContent = '00:00:00';
-            
-            renderTasks();
         }
 
-        function showCongratsModal(duration, tasksCompleted, totalTasks) {
+        function showCongratsModal(duration, tasksCompleted) {
             document.getElementById('modalDuration').textContent = formatTime(duration);
             document.getElementById('modalTasksCompleted').textContent = tasksCompleted;
-            document.getElementById('modalTotalTasks').textContent = totalTasks;
             document.getElementById('creditsEarned').textContent = creditsEarned.toFixed(2);
             
             const modal = document.getElementById('congratsModal');
@@ -1117,7 +1331,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const walletAddress = walletInput.value.trim();
             
             if (!walletAddress) {
-                alert('⚠️ Please enter a wallet address to receive your credits!');
+                alert('⚠️ Please enter a wallet address!');
                 walletInput.focus();
                 return;
             }
@@ -1140,39 +1354,20 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 const result = await response.json();
                 
                 if (result.success) {
-                    console.log('✅ Credits transferred:', result);
-                    alert(`🎉 Success! ${creditsEarned.toFixed(2)} credits sent to ${walletAddress.slice(0, 15)}...`);
+                    alert(`🎉 Success! ${creditsEarned.toFixed(2)} credits sent!`);
                     
                     const modal = document.getElementById('congratsModal');
                     modal.classList.remove('show');
                     
                     walletInput.value = '';
                     creditsEarned = 0;
-                } else {
-                    alert('❌ Failed to transfer credits. Please try again.');
                 }
             } catch (error) {
                 console.error('Credit transfer error:', error);
-                alert('❌ Network error. Please check your connection and try again.');
             } finally {
                 continueBtn.disabled = false;
                 continueBtn.textContent = 'Continue';
             }
-        }
-
-        function formatTime(seconds) {
-            const h = Math.floor(seconds / 3600);
-            const m = Math.floor((seconds % 3600) / 60);
-            const s = seconds % 60;
-            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-        }
-
-        function formatDuration(seconds) {
-            if (seconds < 60) return `${seconds}s`;
-            if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-            const h = Math.floor(seconds / 3600);
-            const m = Math.floor((seconds % 3600) / 60);
-            return `${h}h ${m}m`;
         }
 
         function updateTimer() {
@@ -1183,22 +1378,16 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
         function startSession() {
             if (tasks.length === 0) {
-                alert('⚠️ Please add at least one task before starting a session!');
+                alert('⚠️ Add at least one task first!');
                 return;
             }
             
             sessionRunning = true;
-            sessionPaused = false;
             
             if (!sessionStartTime) {
                 sessionStartTime = Date.now();
                 currentSessionId = 'session_' + Date.now();
             }
-            
-            currentTaskStartTime = Date.now();
-            
-            const inputSection = document.querySelector('.input-section');
-            inputSection.classList.add('disabled');
             
             document.getElementById('startBtn').classList.add('hidden');
             document.getElementById('stopBtn').classList.remove('hidden');
@@ -1212,125 +1401,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
         function stopSession() {
             sessionRunning = false;
-            sessionPaused = true;
             clearInterval(timerInterval);
             
-            const startBtn = document.getElementById('startBtn');
-            startBtn.textContent = 'Continue Session';
-            startBtn.classList.remove('hidden');
-            
+            document.getElementById('startBtn').textContent = 'Continue Session';
+            document.getElementById('startBtn').classList.remove('hidden');
             document.getElementById('stopBtn').classList.add('hidden');
             document.getElementById('finishBtn').classList.add('hidden');
             
-            const display = document.getElementById('timerDisplay');
-            display.classList.remove('running');
-        }
-
-        function renderTasks() {
-            const tasksList = document.getElementById('tasksList');
-            
-            if (tasks.length === 0) {
-                tasksList.innerHTML = '<div class="empty-state">No tasks yet. Add one above!</div>';
-                selectedIndex = null;
-                return;
-            }
-
-            tasksList.innerHTML = '';
-            tasks.forEach((task, index) => {
-                const taskItem = document.createElement('div');
-                taskItem.className = `task-item ${task.done ? 'completed' : ''} ${selectedIndex === index ? 'selected' : ''}`;
-                
-                const durationText = task.actualTime ? `<span class="task-duration">(${formatDuration(task.actualTime)})</span>` : '';
-                
-                taskItem.innerHTML = `
-                    <div class="task-content">
-                        <span class="task-checkbox">${task.done ? '✓' : '○'}</span>
-                        <span class="task-text">${escapeHtml(task.task)}${durationText}</span>
-                    </div>
-                    <button class="delete-btn">×</button>
-                `;
-                
-                const taskContent = taskItem.querySelector('.task-content');
-                taskContent.addEventListener('click', () => {
-                    if (selectedIndex === index) {
-                        const wasUndone = !tasks[index].done;
-                        tasks[index].done = !tasks[index].done;
-                        
-                        if (wasUndone && sessionRunning && currentTaskStartTime) {
-                            const actualTime = Math.floor((Date.now() - currentTaskStartTime) / 1000);
-                            tasks[index].actualTime = (tasks[index].actualTime || 0) + actualTime;
-                            tasks[index].completedAt = new Date().toISOString();
-                            tasks[index].lastSessionId = currentSessionId;
-                            
-                            currentTaskStartTime = Date.now();
-                        }
-                        
-                        saveTasks();
-                        renderTasks();
-                    } else {
-                        selectedIndex = index;
-                        renderTasks();
-                    }
-                });
-                
-                const deleteBtn = taskItem.querySelector('.delete-btn');
-                deleteBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (confirm(`Delete task: "${task.task}"?`)) {
-                        tasks.splice(index, 1);
-                        selectedIndex = null;
-                        saveTasks();
-                        renderTasks();
-                    }
-                });
-                
-                tasksList.appendChild(taskItem);
-            });
-        }
-
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        function addTask() {
-            const input = document.getElementById('taskInput');
-            const taskText = input.value.trim();
-            
-            if (taskText) {
-                const newTask = {
-                    task: taskText,
-                    done: false,
-                    expectedTime: 0,
-                    actualTime: 0,
-                    createdAt: new Date().toISOString(),
-                    subtasks: [],
-                    needsBreakdown: true
-                };
-                
-                tasks.push(newTask);
-                saveTasks();
-                renderTasks();
-                input.value = '';
-                input.focus();
-            }
-        }
-
-        async function archiveToFile(completedTasks) {
-            try {
-                await fetch('/api/archive', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        archived: completedTasks,
-                        archivedAt: new Date().toISOString()
-                    })
-                });
-                console.log('Archived tasks:', completedTasks);
-            } catch (error) {
-                console.error('Failed to archive:', error);
-            }
+            document.getElementById('timerDisplay').classList.remove('running');
         }
 
         document.getElementById('addBtn').addEventListener('click', addTask);
@@ -1359,7 +1437,6 @@ class JSONEncoder(json.JSONEncoder):
 
 class TodoHandler(http.server.SimpleHTTPRequestHandler):
     def get_session_token(self):
-        """Extract session token from cookies"""
         cookie_header = self.headers.get('Cookie')
         if not cookie_header:
             return None
@@ -1372,14 +1449,12 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
         return None
     
     def get_current_user(self):
-        """Get current user ID from session"""
         token = self.get_session_token()
         if not token:
             return None
         return get_user_from_session(token)
     
     def require_auth(self):
-        """Require authentication, redirect to login if not authenticated"""
         user_id = self.get_current_user()
         if not user_id:
             self.send_response(302)
@@ -1420,12 +1495,10 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # Get tasks for THIS USER ONLY
             tasks = list(tasks_collection.find(
                 {'userId': user_id, 'archived': False},
                 {'task': 1, 'done': 1, 'expectedTime': 1, 'actualTime': 1,
-                 'createdAt': 1, 'completedAt': 1, 'lastSessionId': 1, 
-                 'subtasks': 1, 'needsBreakdown': 1}
+                 'createdAt': 1, 'sections': 1, 'subtasks': 1, 'needsBreakdown': 1}
             ).sort('_id', 1))
             
             for task in tasks:
@@ -1478,11 +1551,11 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                     return
                 
                 hashed_password = hash_password(password)
-                user_id = users_collection.insert_one({
+                users_collection.insert_one({
                     'username': username,
                     'password': hashed_password,
                     'createdAt': datetime.now().isoformat()
-                }).inserted_id
+                })
                 
                 print(f"✅ New user registered: {username}")
                 
@@ -1553,18 +1626,17 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 tasks = json.loads(post_data)
                 
-                # Delete existing tasks for THIS USER
                 tasks_collection.delete_many({'userId': user_id, 'archived': False})
                 
-                # Insert tasks with USER ID
                 for task in tasks:
                     task_id = task.pop('id', None)
-                    task['userId'] = user_id  # ⭐ ADD USER ID
+                    task['userId'] = user_id
                     task['archived'] = False
                     task['done'] = bool(task.get('done', False))
                     task['expectedTime'] = int(task.get('expectedTime', 0))
                     task['actualTime'] = int(task.get('actualTime', 0))
                     task['needsBreakdown'] = bool(task.get('needsBreakdown', True))
+                    task['sections'] = task.get('sections', None)
                     task['subtasks'] = task.get('subtasks', [])
                     
                     tasks_collection.insert_one(task)
@@ -1577,6 +1649,53 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f"Error saving tasks: {e}")
                 self.send_error(500)
+        
+        elif self.path == '/api/breakdown':
+            user_id = self.get_current_user()
+            if not user_id:
+                self.send_error(401)
+                return
+            
+            try:
+                data = json.loads(post_data)
+                task_id = data.get('taskId')
+                
+                # Get the task
+                task = tasks_collection.find_one({
+                    '_id': ObjectId(task_id),
+                    'userId': user_id
+                })
+                
+                if not task:
+                    self.send_error(404)
+                    return
+                
+                # Call breakdown function
+                breakdown_result = breakdown_task(task['task'], user_id)
+                
+                # Update task with breakdown
+                tasks_collection.update_one(
+                    {'_id': ObjectId(task_id)},
+                    {'$set': {
+                        'sections': breakdown_result['sections'],
+                        'needsBreakdown': False,
+                        'taskType': breakdown_result.get('taskType', 'other'),
+                        'paceMultiplier': breakdown_result.get('paceMultiplier', 1.0),
+                        'breakdownAt': datetime.now().isoformat()
+                    }}
+                )
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'sections': breakdown_result['sections']
+                }).encode())
+                
+            except Exception as e:
+                print(f"Breakdown error: {e}")
+                self.send_error(500)
                 
         elif self.path == '/api/session':
             user_id = self.get_current_user()
@@ -1586,7 +1705,7 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             
             try:
                 session_data = json.loads(post_data)
-                session_data['userId'] = user_id  # ⭐ ADD USER ID
+                session_data['userId'] = user_id
                 sessions_collection.insert_one(session_data)
                 
                 self.send_response(200)
@@ -1596,39 +1715,6 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 
             except Exception as e:
                 print(f"Error saving session: {e}")
-                self.send_error(500)
-                
-        elif self.path == '/api/archive':
-            user_id = self.get_current_user()
-            if not user_id:
-                self.send_error(401)
-                return
-            
-            try:
-                archive_data = json.loads(post_data)
-                archived_tasks = archive_data['archived']
-                archived_at = archive_data['archivedAt']
-                
-                for task in archived_tasks:
-                    if 'id' in task:
-                        task_id = task['id']
-                        
-                        # Archive only THIS USER's tasks
-                        tasks_collection.update_one(
-                            {'_id': ObjectId(task_id), 'userId': user_id},
-                            {'$set': {
-                                'archived': True,
-                                'archivedAt': archived_at
-                            }}
-                        )
-                
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(b'{"success": true}')
-                
-            except Exception as e:
-                print(f"Error archiving tasks: {e}")
                 self.send_error(500)
                 
         elif self.path == '/api/credit-transfer':
@@ -1643,9 +1729,8 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 credits = transfer_data.get('credits', 0)
                 session_id = transfer_data.get('sessionId')
                 
-                # Log credit transfer WITH USER ID
                 credit_record = {
-                    'userId': user_id,  # ⭐ TRACK USER
+                    'userId': user_id,
                     'walletAddress': wallet_address,
                     'credits': credits,
                     'sessionId': session_id,
@@ -1655,7 +1740,7 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 
                 credit_transfers_collection.insert_one(credit_record)
                 
-                print(f"💰 Credit Transfer: {credits} credits → {wallet_address} (User: {user_id})")
+                print(f"💰 Credit Transfer: {credits} credits → {wallet_address}")
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -1684,6 +1769,7 @@ if __name__ == '__main__':
         print(f"✨ To-Do App running at http://localhost:{PORT}")
         print(f"📊 Database: MongoDB Atlas - {DB_NAME}")
         print(f"🔐 Authentication: Enabled")
+        print(f"🤖 Task Breakdown: Enabled")
         
         if os.environ.get('PORT') is None:
             print("🌐 Opening browser...")
