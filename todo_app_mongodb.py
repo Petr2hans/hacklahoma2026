@@ -4,17 +4,11 @@ import json
 import os
 import webbrowser
 import threading
-import hashlib
-import secrets
 from pymongo import MongoClient
 from bson import ObjectId
 from datetime import datetime
-from http.cookies import SimpleCookie
 
 PORT = int(os.environ.get('PORT', 8000))
-
-# Session storage (in production, use Redis or MongoDB)
-sessions = {}  # {session_token: user_id}
 
 # MongoDB Atlas connection
 MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
@@ -26,20 +20,21 @@ print(f"🔍 MONGODB_URI present: {bool(os.environ.get('MONGODB_URI'))}")
 
 try:
     client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+    # Test the connection
     client.admin.command('ping')
     
     db = client[DB_NAME]
     tasks_collection = db['tasks']
     sessions_collection = db['sessions']
-    users_collection = db['users']
+    credit_transfers_collection = db['credit_transfers']
     
     # Create indexes
     tasks_collection.create_index('archived')
     tasks_collection.create_index('needs_breakdown')
-    tasks_collection.create_index('userId')
+    tasks_collection.create_index('userId')  # INDEX FOR USER ID
     sessions_collection.create_index('session_id', unique=True)
-    sessions_collection.create_index('userId')
-    users_collection.create_index('username', unique=True)
+    sessions_collection.create_index('userId')  # INDEX FOR USER ID
+    credit_transfers_collection.create_index('userId')  # INDEX FOR USER ID
     
     print("✅ Connected to MongoDB Atlas")
     print(f"📊 Database: {DB_NAME}")
@@ -48,425 +43,7 @@ except Exception as e:
     print(f"❌ Error type: {type(e).__name__}")
     print("Set MONGODB_URI environment variable with your Atlas connection string")
 
-# Authentication helpers
-def hash_password(password):
-    """Hash password using SHA-256 with salt"""
-    salt = secrets.token_hex(16)
-    pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-    return f"{salt}${pwd_hash}"
-
-def verify_password(password, hashed):
-    """Verify password against hash"""
-    try:
-        salt, pwd_hash = hashed.split('$')
-        return hashlib.sha256((password + salt).encode()).hexdigest() == pwd_hash
-    except:
-        return False
-
-def create_session(user_id):
-    """Create new session token"""
-    token = secrets.token_urlsafe(32)
-    sessions[token] = str(user_id)
-    return token
-
-def get_user_from_session(session_token):
-    """Get user ID from session token"""
-    return sessions.get(session_token)
-
-# Login page HTML
-LOGIN_HTML = '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Focus App</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Arial', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .auth-container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            width: 100%;
-            max-width: 400px;
-            padding: 50px 40px;
-        }
-        h1 {
-            text-align: center;
-            color: #2d3748;
-            font-size: 32px;
-            margin-bottom: 10px;
-            font-weight: 700;
-        }
-        .subtitle {
-            text-align: center;
-            color: #718096;
-            font-size: 14px;
-            margin-bottom: 40px;
-        }
-        .form-group { margin-bottom: 25px; }
-        label {
-            display: block;
-            font-size: 14px;
-            font-weight: 600;
-            color: #4a5568;
-            margin-bottom: 8px;
-        }
-        input {
-            width: 100%;
-            padding: 14px 16px;
-            font-size: 16px;
-            border: 2px solid #e2e8f0;
-            border-radius: 12px;
-            outline: none;
-            transition: all 0.3s ease;
-        }
-        input:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        .btn {
-            width: 100%;
-            padding: 14px;
-            font-size: 16px;
-            font-weight: 600;
-            border: none;
-            border-radius: 12px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            color: white;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
-        }
-        .btn:active { transform: translateY(0); }
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
-        .error {
-            background: #fed7d7;
-            color: #c53030;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            display: none;
-        }
-        .error.show { display: block; }
-        .switch-link {
-            text-align: center;
-            margin-top: 25px;
-            color: #718096;
-            font-size: 14px;
-        }
-        .switch-link a {
-            color: #667eea;
-            text-decoration: none;
-            font-weight: 600;
-        }
-        .switch-link a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <div class="auth-container">
-        <h1>Welcome Back</h1>
-        <p class="subtitle">Login to continue your productivity journey</p>
-        
-        <div class="error" id="errorMsg"></div>
-        
-        <form id="loginForm">
-            <div class="form-group">
-                <label for="username">Username</label>
-                <input type="text" id="username" required autocomplete="username">
-            </div>
-            
-            <div class="form-group">
-                <label for="password">Password</label>
-                <input type="password" id="password" required autocomplete="current-password">
-            </div>
-            
-            <button type="submit" class="btn" id="loginBtn">Login</button>
-        </form>
-        
-        <div class="switch-link">
-            Don't have an account? <a href="/register">Sign up</a>
-        </div>
-    </div>
-
-    <script>
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            const username = document.getElementById('username').value.trim();
-            const password = document.getElementById('password').value;
-            const errorMsg = document.getElementById('errorMsg');
-            const loginBtn = document.getElementById('loginBtn');
-            
-            errorMsg.classList.remove('show');
-            loginBtn.disabled = true;
-            loginBtn.textContent = 'Logging in...';
-            
-            try {
-                const response = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ username, password })
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    window.location.href = '/';
-                } else {
-                    errorMsg.textContent = result.message || 'Login failed';
-                    errorMsg.classList.add('show');
-                }
-            } catch (error) {
-                errorMsg.textContent = 'Network error. Please try again.';
-                errorMsg.classList.add('show');
-            } finally {
-                loginBtn.disabled = false;
-                loginBtn.textContent = 'Login';
-            }
-        });
-    </script>
-</body>
-</html>
-'''
-
-# Register page HTML
-REGISTER_HTML = '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Register - Focus App</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Arial', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .auth-container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            width: 100%;
-            max-width: 400px;
-            padding: 50px 40px;
-        }
-        h1 {
-            text-align: center;
-            color: #2d3748;
-            font-size: 32px;
-            margin-bottom: 10px;
-            font-weight: 700;
-        }
-        .subtitle {
-            text-align: center;
-            color: #718096;
-            font-size: 14px;
-            margin-bottom: 40px;
-        }
-        .form-group { margin-bottom: 25px; }
-        label {
-            display: block;
-            font-size: 14px;
-            font-weight: 600;
-            color: #4a5568;
-            margin-bottom: 8px;
-        }
-        input {
-            width: 100%;
-            padding: 14px 16px;
-            font-size: 16px;
-            border: 2px solid #e2e8f0;
-            border-radius: 12px;
-            outline: none;
-            transition: all 0.3s ease;
-        }
-        input:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        .btn {
-            width: 100%;
-            padding: 14px;
-            font-size: 16px;
-            font-weight: 600;
-            border: none;
-            border-radius: 12px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            color: white;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
-        }
-        .btn:active { transform: translateY(0); }
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
-        .error {
-            background: #fed7d7;
-            color: #c53030;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            display: none;
-        }
-        .error.show { display: block; }
-        .success {
-            background: #c6f6d5;
-            color: #22543d;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            display: none;
-        }
-        .success.show { display: block; }
-        .switch-link {
-            text-align: center;
-            margin-top: 25px;
-            color: #718096;
-            font-size: 14px;
-        }
-        .switch-link a {
-            color: #667eea;
-            text-decoration: none;
-            font-weight: 600;
-        }
-        .switch-link a:hover { text-decoration: underline; }
-        .hint {
-            font-size: 12px;
-            color: #a0aec0;
-            margin-top: 5px;
-        }
-    </style>
-</head>
-<body>
-    <div class="auth-container">
-        <h1>Create Account</h1>
-        <p class="subtitle">Start tracking your productivity today</p>
-        
-        <div class="error" id="errorMsg"></div>
-        <div class="success" id="successMsg"></div>
-        
-        <form id="registerForm">
-            <div class="form-group">
-                <label for="username">Username</label>
-                <input type="text" id="username" required autocomplete="username" minlength="3">
-                <div class="hint">At least 3 characters</div>
-            </div>
-            
-            <div class="form-group">
-                <label for="password">Password</label>
-                <input type="password" id="password" required autocomplete="new-password" minlength="6">
-                <div class="hint">At least 6 characters</div>
-            </div>
-            
-            <div class="form-group">
-                <label for="confirmPassword">Confirm Password</label>
-                <input type="password" id="confirmPassword" required autocomplete="new-password">
-            </div>
-            
-            <button type="submit" class="btn" id="registerBtn">Create Account</button>
-        </form>
-        
-        <div class="switch-link">
-            Already have an account? <a href="/login">Login</a>
-        </div>
-    </div>
-
-    <script>
-        document.getElementById('registerForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            const username = document.getElementById('username').value.trim();
-            const password = document.getElementById('password').value;
-            const confirmPassword = document.getElementById('confirmPassword').value;
-            const errorMsg = document.getElementById('errorMsg');
-            const successMsg = document.getElementById('successMsg');
-            const registerBtn = document.getElementById('registerBtn');
-            
-            errorMsg.classList.remove('show');
-            successMsg.classList.remove('show');
-            
-            if (username.length < 3) {
-                errorMsg.textContent = 'Username must be at least 3 characters';
-                errorMsg.classList.add('show');
-                return;
-            }
-            
-            if (password.length < 6) {
-                errorMsg.textContent = 'Password must be at least 6 characters';
-                errorMsg.classList.add('show');
-                return;
-            }
-            
-            if (password !== confirmPassword) {
-                errorMsg.textContent = 'Passwords do not match';
-                errorMsg.classList.add('show');
-                return;
-            }
-            
-            registerBtn.disabled = true;
-            registerBtn.textContent = 'Creating account...';
-            
-            try {
-                const response = await fetch('/api/register', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ username, password })
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    successMsg.textContent = 'Account created! Redirecting...';
-                    successMsg.classList.add('show');
-                    setTimeout(() => window.location.href = '/login', 1500);
-                } else {
-                    errorMsg.textContent = result.message || 'Registration failed';
-                    errorMsg.classList.add('show');
-                }
-            } catch (error) {
-                errorMsg.textContent = 'Network error. Please try again.';
-                errorMsg.classList.add('show');
-            } finally {
-                registerBtn.disabled = false;
-                registerBtn.textContent = 'Create Account';
-            }
-        });
-    </script>
-</body>
-</html>
-'''
-
-# Main app HTML content (from your original code with logout button added)
+# HTML content embedded
 HTML_CONTENT = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -497,27 +74,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
             width: 100%;
             max-width: 500px;
             padding: 40px;
-            position: relative;
-        }
-
-        .logout-btn {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            padding: 8px 16px;
-            font-size: 12px;
-            font-weight: 600;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            color: #718096;
-            background: #edf2f7;
-        }
-
-        .logout-btn:hover {
-            background: #e2e8f0;
-            color: #4a5568;
         }
 
         h1 {
@@ -785,6 +341,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
             margin-left: 8px;
         }
 
+        /* Modal styles */
         .modal {
             display: none;
             position: fixed;
@@ -959,8 +516,6 @@ HTML_CONTENT = '''<!DOCTYPE html>
 </head>
 <body>
     <div class="container">
-        <button class="logout-btn" onclick="window.location.href='/api/logout'">Logout</button>
-        
         <h1>To-Do List</h1>
         
         <div class="input-section">
@@ -982,6 +537,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Congratulations Modal -->
     <div class="modal" id="congratsModal">
         <div class="modal-content">
             <div class="congrats-emoji">🎉</div>
@@ -1024,6 +580,17 @@ HTML_CONTENT = '''<!DOCTYPE html>
     </div>
 
     <script>
+        // 🆔 USER IDENTIFICATION SYSTEM
+        // Each user gets a unique ID stored in localStorage
+        let userId = localStorage.getItem('userId');
+        if (!userId) {
+            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('userId', userId);
+            console.log('🆔 New user ID created:', userId);
+        } else {
+            console.log('🆔 Existing user ID loaded:', userId);
+        }
+
         let tasks = [];
         let selectedIndex = null;
         let sessionRunning = false;
@@ -1034,16 +601,23 @@ HTML_CONTENT = '''<!DOCTYPE html>
         let currentSessionId = null;
         let creditsEarned = 0;
 
+        // Calculate credits: 1 credit per 15 minutes, rounded to nearest 7 minutes
         function calculateCredits(durationSeconds) {
             const durationMinutes = durationSeconds / 60;
+            
+            // Round to nearest 7-minute increment
             const roundedMinutes = Math.round(durationMinutes / 7) * 7;
+            
+            // Calculate credits (1 credit per 15 minutes)
             const credits = roundedMinutes / 15;
-            return Math.max(0, credits);
+            
+            return Math.max(0, credits); // Never negative
         }
 
         async function loadTasks() {
             try {
-                const response = await fetch('/api/tasks');
+                // ✅ Load tasks for THIS USER ONLY
+                const response = await fetch(`/api/tasks?userId=${userId}`);
                 tasks = await response.json();
                 renderTasks();
             } catch (error) {
@@ -1053,10 +627,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
         async function saveTasks() {
             try {
+                // ✅ Save tasks with USER ID
                 await fetch('/api/tasks', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(tasks)
+                    body: JSON.stringify({
+                        userId: userId,
+                        tasks: tasks
+                    })
                 });
             } catch (error) {
                 console.error('Save failed:', error);
@@ -1069,9 +647,12 @@ HTML_CONTENT = '''<!DOCTYPE html>
             const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
             const tasksCompleted = tasks.filter(t => t.done && t.lastSessionId === currentSessionId).length;
             
+            // Calculate credits earned
             creditsEarned = calculateCredits(sessionDuration);
             
+            // ✅ Create session summary WITH USER ID
             const sessionData = {
+                userId: userId,
                 sessionId: currentSessionId,
                 startTime: new Date(sessionStartTime).toISOString(),
                 endTime: new Date().toISOString(),
@@ -1081,6 +662,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 timestamp: Date.now()
             };
             
+            // Save session data
             try {
                 await fetch('/api/session', {
                     method: 'POST',
@@ -1092,14 +674,17 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 console.error('Failed to save session:', error);
             }
             
+            // Auto-archive completed tasks
             const completedTasks = tasks.filter(t => t.done);
             if (completedTasks.length > 0) {
                 await archiveToFile(completedTasks);
                 await loadTasks();
             }
             
+            // Show congratulations modal with credits
             showCongratsModal(sessionDuration, tasksCompleted, tasks.length);
             
+            // Reset everything
             sessionRunning = false;
             sessionPaused = false;
             sessionStartTime = null;
@@ -1107,9 +692,11 @@ HTML_CONTENT = '''<!DOCTYPE html>
             currentSessionId = null;
             clearInterval(timerInterval);
             
+            // Re-enable task input
             const inputSection = document.querySelector('.input-section');
             inputSection.classList.remove('disabled');
             
+            // Reset UI
             const startBtn = document.getElementById('startBtn');
             startBtn.textContent = 'Start Session';
             startBtn.classList.remove('hidden');
@@ -1155,10 +742,12 @@ HTML_CONTENT = '''<!DOCTYPE html>
             continueBtn.textContent = 'Processing...';
             
             try {
+                // ✅ Send credits with USER ID
                 const response = await fetch('/api/credit-transfer', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
+                        userId: userId,
                         walletAddress: walletAddress,
                         credits: creditsEarned,
                         sessionId: currentSessionId || 'unknown'
@@ -1347,10 +936,12 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
         async function archiveToFile(completedTasks) {
             try {
+                // ✅ Archive with USER ID
                 await fetch('/api/archive', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
+                        userId: userId,
                         archived: completedTasks,
                         archivedAt: new Date().toISOString()
                     })
@@ -1385,76 +976,35 @@ class JSONEncoder(json.JSONEncoder):
             return obj.isoformat()
         return super().default(obj)
 
-
 class TodoHandler(http.server.SimpleHTTPRequestHandler):
-    def get_session_token(self):
-        """Extract session token from cookies"""
-        cookie_header = self.headers.get('Cookie')
-        if not cookie_header:
-            return None
-        
-        cookie = SimpleCookie()
-        cookie.load(cookie_header)
-        
-        if 'session_token' in cookie:
-            return cookie['session_token'].value
-        return None
-    
-    def get_current_user(self):
-        """Get current logged-in user ID"""
-        session_token = self.get_session_token()
-        if not session_token:
-            return None
-        return get_user_from_session(session_token)
-    
-    def require_auth(self):
-        """Check if user is authenticated, redirect to login if not"""
-        user_id = self.get_current_user()
-        if not user_id:
-            self.send_response(302)
-            self.send_header('Location', '/login')
-            self.end_headers()
-            return None
-        return user_id
-    
     def do_GET(self):
-        if self.path == '/login':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            self.wfile.write(LOGIN_HTML.encode())
-            
-        elif self.path == '/register':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            self.wfile.write(REGISTER_HTML.encode())
-            
-        elif self.path == '/' or self.path == '/index.html':
-            user_id = self.require_auth()
-            if not user_id:
-                return
-            
+        if self.path == '/' or self.path == '/index.html':
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
             self.wfile.write(HTML_CONTENT.encode())
             
-        elif self.path == '/api/tasks':
-            user_id = self.require_auth()
-            if not user_id:
-                return
+        elif self.path.startswith('/api/tasks'):
+            # ✅ Extract userId from query parameter
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            query_params = parse_qs(parsed.query)
+            user_id = query_params.get('userId', [None])[0]
             
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # Get tasks for current user only
+            # ✅ Get tasks for THIS USER ONLY
+            query_filter = {'archived': False}
+            if user_id:
+                query_filter['userId'] = user_id
+                
             tasks = list(tasks_collection.find(
-                {'userId': user_id, 'archived': False},
+                query_filter,
                 {'task': 1, 'done': 1, 'expectedTime': 1, 'actualTime': 1,
                  'createdAt': 1, 'completedAt': 1, 'lastSessionId': 1, 
-                 'subtasks': 1, 'needsBreakdown': 1}
+                 'subtasks': 1, 'needsBreakdown': 1, 'userId': 1}
             ).sort('_id', 1))
             
             for task in tasks:
@@ -1463,136 +1013,30 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
             
             self.wfile.write(json.dumps(tasks, cls=JSONEncoder).encode())
             
-        elif self.path == '/api/logout':
-            session_token = self.get_session_token()
-            if session_token and session_token in sessions:
-                del sessions[session_token]
-            
-            self.send_response(302)
-            self.send_header('Location', '/login')
-            self.send_header('Set-Cookie', 'session_token=; Path=/; Max-Age=0')
-            self.end_headers()
-            
         else:
             self.send_error(404)
     
     def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
         
-        if self.path == '/api/register':
+        if self.path == '/api/tasks':
             try:
                 data = json.loads(post_data)
-                username = data.get('username', '').strip()
-                password = data.get('password', '')
+                user_id = data.get('userId')
+                tasks = data.get('tasks', [])
                 
-                # Validation
-                if len(username) < 3:
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'Username must be at least 3 characters'
-                    }).encode())
+                if not user_id:
+                    self.send_error(400)
                     return
                 
-                if len(password) < 6:
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'Password must be at least 6 characters'
-                    }).encode())
-                    return
-                
-                # Check if username already exists
-                if users_collection.find_one({'username': username}):
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'Username already exists'
-                    }).encode())
-                    return
-                
-                # Create new user
-                hashed_password = hash_password(password)
-                user_id = users_collection.insert_one({
-                    'username': username,
-                    'password': hashed_password,
-                    'createdAt': datetime.now().isoformat()
-                }).inserted_id
-                
-                print(f"✅ New user registered: {username}")
-                
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': True,
-                    'message': 'Account created successfully'
-                }).encode())
-                
-            except Exception as e:
-                print(f"Registration error: {e}")
-                self.send_error(500)
-                
-        elif self.path == '/api/login':
-            try:
-                data = json.loads(post_data)
-                username = data.get('username', '').strip()
-                password = data.get('password', '')
-                
-                # Find user
-                user = users_collection.find_one({'username': username})
-                
-                if not user or not verify_password(password, user['password']):
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'Invalid username or password'
-                    }).encode())
-                    return
-                
-                # Create session
-                session_token = create_session(str(user['_id']))
-                
-                print(f"✅ User logged in: {username}")
-                
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Set-Cookie', f'session_token={session_token}; Path=/; HttpOnly; Max-Age=2592000')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': True,
-                    'message': 'Login successful'
-                }).encode())
-                
-            except Exception as e:
-                print(f"Login error: {e}")
-                self.send_error(500)
-                
-        elif self.path == '/api/tasks':
-            user_id = self.get_current_user()
-            if not user_id:
-                self.send_error(401)
-                return
-            
-            try:
-                tasks = json.loads(post_data)
-                
-                # Delete existing non-archived tasks for this user
+                # ✅ Delete existing tasks for THIS USER ONLY
                 tasks_collection.delete_many({'userId': user_id, 'archived': False})
                 
-                # Insert all tasks with userId
+                # ✅ Insert tasks with USER ID
                 for task in tasks:
                     task_id = task.pop('id', None)
-                    task['userId'] = user_id
+                    task['userId'] = user_id  # ADD USER ID TO EACH TASK
                     task['archived'] = False
                     task['done'] = bool(task.get('done', False))
                     task['expectedTime'] = int(task.get('expectedTime', 0))
@@ -1612,14 +1056,9 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(500)
                 
         elif self.path == '/api/session':
-            user_id = self.get_current_user()
-            if not user_id:
-                self.send_error(401)
-                return
-            
             try:
                 session_data = json.loads(post_data)
-                session_data['userId'] = user_id
+                # ✅ userId is already in session_data from frontend
                 sessions_collection.insert_one(session_data)
                 
                 self.send_response(200)
@@ -1632,21 +1071,21 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(500)
                 
         elif self.path == '/api/archive':
-            user_id = self.get_current_user()
-            if not user_id:
-                self.send_error(401)
-                return
-            
             try:
                 archive_data = json.loads(post_data)
-                archived_tasks = archive_data['archived']
-                archived_at = archive_data['archivedAt']
+                user_id = archive_data.get('userId')
+                archived_tasks = archive_data.get('archived', [])
+                archived_at = archive_data.get('archivedAt')
                 
+                if not user_id:
+                    self.send_error(400)
+                    return
+                
+                # ✅ Archive only THIS USER's tasks
                 for task in archived_tasks:
                     if 'id' in task:
                         task_id = task['id']
                         
-                        # Mark as archived (only for current user's tasks)
                         tasks_collection.update_one(
                             {'_id': ObjectId(task_id), 'userId': user_id},
                             {'$set': {
@@ -1665,20 +1104,20 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(500)
                 
         elif self.path == '/api/credit-transfer':
-            user_id = self.get_current_user()
-            if not user_id:
-                self.send_error(401)
-                return
-            
             try:
                 transfer_data = json.loads(post_data)
+                user_id = transfer_data.get('userId')
                 wallet_address = transfer_data.get('walletAddress')
                 credits = transfer_data.get('credits', 0)
                 session_id = transfer_data.get('sessionId')
                 
-                # Log the credit transfer
+                if not user_id:
+                    self.send_error(400)
+                    return
+                
+                # ✅ Log credit transfer WITH USER ID
                 credit_record = {
-                    'userId': user_id,
+                    'userId': user_id,  # TRACK WHICH USER
                     'walletAddress': wallet_address,
                     'credits': credits,
                     'sessionId': session_id,
@@ -1686,8 +1125,7 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
                     'status': 'pending'
                 }
                 
-                # Store in MongoDB
-                db['credit_transfers'].insert_one(credit_record)
+                credit_transfers_collection.insert_one(credit_record)
                 
                 print(f"💰 Credit Transfer: {credits} credits → {wallet_address} (User: {user_id})")
                 
@@ -1710,16 +1148,13 @@ class TodoHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-
 def open_browser():
     webbrowser.open(f'http://localhost:{PORT}')
-
 
 if __name__ == '__main__':
     with socketserver.TCPServer(("0.0.0.0", PORT), TodoHandler) as httpd:
         print(f"✨ To-Do App running at http://localhost:{PORT}")
         print(f"📊 Database: MongoDB Atlas - {DB_NAME}")
-        print(f"🔐 Authentication: Enabled")
         
         if os.environ.get('PORT') is None:
             print("🌐 Opening browser...")
